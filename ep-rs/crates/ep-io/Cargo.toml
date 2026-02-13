@@ -1,0 +1,12 @@
+[package]
+name = "ep-io"
+version = "0.1.0"
+edition = "2021"
+description = "Input parsing (IDF/JSON) and schema validation for EnergyPlus-rs"
+
+[dependencies]
+ep-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }

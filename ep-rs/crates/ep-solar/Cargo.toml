@@ -1,0 +1,12 @@
+[package]
+name = "ep-solar"
+version = "0.1.0"
+edition = "2021"
+description = "Solar and shading calculations for EnergyPlus-rs"
+
+[dependencies]
+ep-units = { workspace = true }
+ep-core = { workspace = true }
+ep-weather = { workspace = true }
+ep-surfaces = { workspace = true }
+serde = { workspace = true }

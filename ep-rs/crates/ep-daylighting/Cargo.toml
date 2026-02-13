@@ -1,0 +1,11 @@
+[package]
+name = "ep-daylighting"
+version = "0.1.0"
+edition = "2021"
+description = "Daylighting: split-flux method, glare, lighting controls"
+
+[dependencies]
+ep-units = { workspace = true }
+ep-core = { workspace = true }
+ep-surfaces = { workspace = true }
+serde = { workspace = true }

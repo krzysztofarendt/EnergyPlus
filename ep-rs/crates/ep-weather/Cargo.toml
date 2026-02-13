@@ -1,0 +1,12 @@
+[package]
+name = "ep-weather"
+version = "0.1.0"
+edition = "2021"
+description = "Weather data processing and solar calculations for EnergyPlus-rs"
+
+[dependencies]
+ep-units = { workspace = true }
+ep-core = { workspace = true }
+ep-psychrometrics = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }

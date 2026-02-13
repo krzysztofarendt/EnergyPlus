@@ -1,0 +1,69 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ep-units",
+    "crates/ep-core",
+    "crates/ep-psychrometrics",
+    "crates/ep-fluids",
+    "crates/ep-curves",
+    "crates/ep-weather",
+    "crates/ep-schedule",
+    "crates/ep-io",
+    "crates/ep-materials",
+    "crates/ep-surfaces",
+    "crates/ep-solar",
+    "crates/ep-envelope",
+    "crates/ep-windows",
+    "crates/ep-ground",
+    "crates/ep-internal-gains",
+    "crates/ep-zone-air",
+    "crates/ep-airflow",
+    "crates/ep-daylighting",
+    "crates/ep-nodes",
+    "crates/ep-fans",
+    "crates/ep-coils",
+    "crates/ep-plant",
+    "crates/ep-hvac",
+    "tools/idf-convert",
+    "tools/ep-diff",
+]
+
+[workspace.dependencies]
+# Shared dependency versions
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false }
+csv = "1"
+log = "0.4"
+
+# Internal crate dependencies
+ep-units = { path = "crates/ep-units" }
+ep-core = { path = "crates/ep-core" }
+ep-psychrometrics = { path = "crates/ep-psychrometrics" }
+ep-fluids = { path = "crates/ep-fluids" }
+ep-curves = { path = "crates/ep-curves" }
+ep-weather = { path = "crates/ep-weather" }
+ep-schedule = { path = "crates/ep-schedule" }
+ep-io = { path = "crates/ep-io" }
+ep-materials = { path = "crates/ep-materials" }
+ep-surfaces = { path = "crates/ep-surfaces" }
+ep-solar = { path = "crates/ep-solar" }
+ep-envelope = { path = "crates/ep-envelope" }
+ep-windows = { path = "crates/ep-windows" }
+ep-ground = { path = "crates/ep-ground" }
+ep-internal-gains = { path = "crates/ep-internal-gains" }
+ep-zone-air = { path = "crates/ep-zone-air" }
+ep-airflow = { path = "crates/ep-airflow" }
+ep-daylighting = { path = "crates/ep-daylighting" }
+ep-nodes = { path = "crates/ep-nodes" }
+ep-fans = { path = "crates/ep-fans" }
+ep-coils = { path = "crates/ep-coils" }
+ep-plant = { path = "crates/ep-plant" }
+ep-hvac = { path = "crates/ep-hvac" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+opt-level = 3

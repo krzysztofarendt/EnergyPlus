@@ -1,0 +1,9 @@
+[package]
+name = "ep-diff"
+version = "0.1.0"
+edition = "2021"
+description = "Output comparison tool for regression testing"
+
+[dependencies]
+anyhow = { workspace = true }
+csv = { workspace = true }

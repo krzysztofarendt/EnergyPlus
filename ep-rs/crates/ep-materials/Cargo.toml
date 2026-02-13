@@ -1,0 +1,10 @@
+[package]
+name = "ep-materials"
+version = "0.1.0"
+edition = "2021"
+description = "Material and construction definitions for EnergyPlus-rs"
+
+[dependencies]
+ep-units = { workspace = true }
+ep-core = { workspace = true }
+serde = { workspace = true }

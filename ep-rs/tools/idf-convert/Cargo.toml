@@ -1,0 +1,9 @@
+[package]
+name = "idf-convert"
+version = "0.1.0"
+edition = "2021"
+description = "IDF-to-new-format converter"
+
+[dependencies]
+ep-io = { workspace = true }
+anyhow = { workspace = true }

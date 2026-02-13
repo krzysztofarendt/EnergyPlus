@@ -1,0 +1,14 @@
+[package]
+name = "ep-hvac"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ep-units = { workspace = true }
+ep-core = { workspace = true }
+ep-psychrometrics = { workspace = true }
+ep-nodes = { workspace = true }
+ep-fans = { workspace = true }
+ep-coils = { workspace = true }
+ep-plant = { workspace = true }
+serde = { workspace = true }

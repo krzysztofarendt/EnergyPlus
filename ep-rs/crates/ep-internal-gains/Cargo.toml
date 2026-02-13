@@ -1,0 +1,11 @@
+[package]
+name = "ep-internal-gains"
+version = "0.1.0"
+edition = "2021"
+description = "Internal heat gains: people, lights, equipment, infiltration, ventilation, mixing"
+
+[dependencies]
+ep-units = { workspace = true }
+ep-core = { workspace = true }
+ep-psychrometrics = { workspace = true }
+serde = { workspace = true }

@@ -1,0 +1,9 @@
+[package]
+name = "ep-curves"
+version = "0.1.0"
+edition = "2021"
+description = "Performance curve evaluation for EnergyPlus-rs"
+
+[dependencies]
+ep-units = { workspace = true }
+ep-core = { workspace = true }

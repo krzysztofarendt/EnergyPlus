@@ -1,0 +1,11 @@
+[package]
+name = "ep-surfaces"
+version = "0.1.0"
+edition = "2021"
+description = "Surface geometry, view factors, and shading geometry for EnergyPlus-rs"
+
+[dependencies]
+ep-units = { workspace = true }
+ep-core = { workspace = true }
+ep-materials = { workspace = true }
+serde = { workspace = true }

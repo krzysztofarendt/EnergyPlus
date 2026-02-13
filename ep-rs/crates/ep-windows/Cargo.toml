@@ -1,0 +1,11 @@
+[package]
+name = "ep-windows"
+version = "0.1.0"
+edition = "2021"
+description = "Fenestration optics and thermal models for EnergyPlus-rs"
+
+[dependencies]
+ep-units = { workspace = true }
+ep-core = { workspace = true }
+ep-materials = { workspace = true }
+serde = { workspace = true }

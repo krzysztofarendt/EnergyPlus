@@ -1,0 +1,12 @@
+[package]
+name = "ep-zone-air"
+version = "0.1.0"
+edition = "2021"
+description = "Zone air heat balance predictor-corrector"
+
+[dependencies]
+ep-units = { workspace = true }
+ep-core = { workspace = true }
+ep-psychrometrics = { workspace = true }
+ep-internal-gains = { workspace = true }
+serde = { workspace = true }

@@ -1,0 +1,12 @@
+[package]
+name = "ep-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core types, error handling, and component traits for EnergyPlus-rs"
+
+[dependencies]
+ep-units = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }

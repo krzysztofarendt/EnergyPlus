@@ -1,0 +1,14 @@
+[package]
+name = "ep-envelope"
+version = "0.1.0"
+edition = "2021"
+description = "Surface heat balance (CTF, CondFD), convection for EnergyPlus-rs"
+
+[dependencies]
+ep-units = { workspace = true }
+ep-core = { workspace = true }
+ep-materials = { workspace = true }
+ep-surfaces = { workspace = true }
+ep-solar = { workspace = true }
+ep-weather = { workspace = true }
+serde = { workspace = true }

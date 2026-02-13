@@ -1,0 +1,10 @@
+[package]
+name = "ep-fluids"
+version = "0.1.0"
+edition = "2021"
+description = "Fluid property lookups for EnergyPlus-rs"
+
+[dependencies]
+ep-units = { workspace = true }
+ep-core = { workspace = true }
+thiserror = { workspace = true }
