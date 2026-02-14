@@ -1,0 +1,9 @@
+[package]
+name = "ep-sim"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ep-core = { workspace = true }
+ep-weather = { workspace = true }
+ep-schedule = { workspace = true }

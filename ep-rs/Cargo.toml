@@ -24,6 +24,12 @@ members = [
     "crates/ep-coils",
     "crates/ep-plant",
     "crates/ep-hvac",
+    "crates/ep-ems",
+    "crates/ep-fmi",
+    "crates/ep-generation",
+    "crates/ep-demand",
+    "crates/ep-sim",
+    "crates/ep-validation",
     "tools/idf-convert",
     "tools/ep-diff",
 ]
@@ -62,6 +68,12 @@ ep-fans = { path = "crates/ep-fans" }
 ep-coils = { path = "crates/ep-coils" }
 ep-plant = { path = "crates/ep-plant" }
 ep-hvac = { path = "crates/ep-hvac" }
+ep-ems = { path = "crates/ep-ems" }
+ep-fmi = { path = "crates/ep-fmi" }
+ep-generation = { path = "crates/ep-generation" }
+ep-demand = { path = "crates/ep-demand" }
+ep-sim = { path = "crates/ep-sim" }
+ep-validation = { path = "crates/ep-validation" }
 
 [profile.release]
 lto = "thin"

@@ -97,11 +97,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "ep-demand"
+version = "0.1.0"
+dependencies = [
+ "ep-core",
+ "ep-schedule",
+]
+
+[[package]]
 name = "ep-diff"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "csv",
+]
+
+[[package]]
+name = "ep-ems"
+version = "0.1.0"
+dependencies = [
+ "ep-core",
+ "ep-curves",
+ "ep-psychrometrics",
+ "ep-schedule",
 ]
 
 [[package]]
@@ -136,6 +154,22 @@ dependencies = [
  "ep-core",
  "ep-units",
  "thiserror",
+]
+
+[[package]]
+name = "ep-fmi"
+version = "0.1.0"
+dependencies = [
+ "ep-core",
+]
+
+[[package]]
+name = "ep-generation"
+version = "0.1.0"
+dependencies = [
+ "ep-core",
+ "ep-curves",
+ "ep-psychrometrics",
 ]
 
 [[package]]
@@ -232,6 +266,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ep-sim"
+version = "0.1.0"
+dependencies = [
+ "ep-core",
+ "ep-schedule",
+ "ep-weather",
+]
+
+[[package]]
 name = "ep-solar"
 version = "0.1.0"
 dependencies = [
@@ -255,6 +298,14 @@ dependencies = [
 [[package]]
 name = "ep-units"
 version = "0.1.0"
+
+[[package]]
+name = "ep-validation"
+version = "0.1.0"
+dependencies = [
+ "ep-core",
+ "ep-psychrometrics",
+]
 
 [[package]]
 name = "ep-weather"

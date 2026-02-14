@@ -1,0 +1,10 @@
+[package]
+name = "ep-ems"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ep-core = { workspace = true }
+ep-psychrometrics = { workspace = true }
+ep-curves = { workspace = true }
+ep-schedule = { workspace = true }
