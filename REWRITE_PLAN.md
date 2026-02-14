@@ -2,3078 +2,1072 @@
 
 ## Project Charter for a Modern Building Energy Simulation Engine
 
-**Version:** 1.0
-**Date:** 2026-02-12
-**Status:** Draft
+**Version:** 2.0
+**Date:** 2026-02-14
+**Status:** In Progress — Foundation Complete, Core Simulation Pending
 
 ---
 
 ## Table of Contents
 
-1. [Architecture Overview](#1-architecture-overview)
-2. [Module Decomposition](#2-module-decomposition)
-3. [Phased Roadmap](#3-phased-roadmap)
-4. [Validation & Testing Strategy](#4-validation--testing-strategy)
-5. [Build & Tooling](#5-build--tooling)
-6. [Comparison with Existing Efforts](#6-comparison-with-existing-efforts)
-7. [Open Questions & Decision Points](#7-open-questions--decision-points)
+1. [Current State Assessment](#1-current-state-assessment)
+2. [Gap Analysis](#2-gap-analysis)
+3. [Phase 6: Core Heat Balance](#3-phase-6-core-heat-balance)
+4. [Phase 7: Solar, Shading & Daylighting](#4-phase-7-solar-shading--daylighting)
+5. [Phase 8: HVAC Integration](#5-phase-8-hvac-integration)
+6. [Phase 9: Plant Loop Integration](#6-phase-9-plant-loop-integration)
+7. [Phase 10: Simulation Driver & Sizing](#7-phase-10-simulation-driver--sizing)
+8. [Phase 11: Equipment Breadth](#8-phase-11-equipment-breadth)
+9. [Phase 12: Advanced Features & Parity](#9-phase-12-advanced-features--parity)
+10. [Crate-Level Summary](#10-crate-level-summary)
+11. [Priority & Dependencies](#11-priority--dependencies)
+12. [Verification Strategy](#12-verification-strategy)
 
 ---
 
-## 1. Architecture Overview
-
-### 1.1 Current State Assessment
-
-EnergyPlus is approximately **798,000 lines of C++17** across 304 implementation files and 366 headers,
-plus **200,000 lines of legacy Fortran** in auxiliary utilities. It bundles 28 third-party libraries and
-has 457,000 lines of test code across 271 unit test files. The largest single file (`OutputReportTabular.cc`)
-is nearly 20,000 lines. Ten files exceed 10,000 lines each.
-
-The codebase follows a **Central State Pattern**: a single `EnergyPlusData` struct holds 150+
-`unique_ptr` members, each containing module-specific state. Every function takes
-`EnergyPlusData &state` as its first parameter. Equipment modules follow a consistent
-GetInput/Init/Calc/Update lifecycle managed through the `PlantComponent` virtual interface.
-
-The simulation runs a nested loop: Environment -> Day -> Hour -> TimeStep. Within each timestep,
-the sequence is: `ManageWeather()` -> `ManageHeatBalance()` -> `ManageHVAC()`. The plant solver
-uses a half-loop iteration scheme with 2-8 sub-iterations for convergence.
-
-### 1.2 Crate Structure
-
-The Rust engine uses a Cargo workspace organized as a mono-repo. Each crate has a focused
-responsibility and minimal dependencies on sibling crates.
-
-```
-ep-rs/
-+-- Cargo.toml                  # Workspace root
-+-- crates/
-|   +-- ep-units/               # Physical units type system
-|   +-- ep-core/                # Shared types, error handling, node/loop abstractions
-|   +-- ep-psychrometrics/      # Psychrometric calculations
-|   +-- ep-fluids/              # Fluid properties (water, glycol, refrigerants)
-|   +-- ep-curves/              # Performance curve evaluation
-|   +-- ep-weather/             # EPW parsing, solar position, sky models
-|   +-- ep-schedule/            # Schedule types and evaluation
-|   +-- ep-io/                  # Input parsing (IDF/JSON/new format), output framework
-|   +-- ep-materials/           # Material and construction definitions
-|   +-- ep-surfaces/            # Surface geometry, view factors, shading geometry
-|   +-- ep-solar/               # Solar/shading calculations, sun position
-|   +-- ep-envelope/            # Surface heat balance (CTF, CondFD), convection
-|   +-- ep-windows/             # Fenestration optics and thermal, glazing layers
-|   +-- ep-daylighting/         # Daylighting calculations, glare, controls
-|   +-- ep-zone/                # Zone air heat balance, predictor-corrector
-|   +-- ep-airflow/             # Airflow network, infiltration, ventilation
-|   +-- ep-hvac/                # HVAC air-side components (fans, coils, AHUs)
-|   +-- ep-plant/               # Plant loops, solvers, water-side equipment
-|   +-- ep-refrigeration/       # Supermarket refrigeration, walk-ins
-|   +-- ep-water/               # DHW, water heaters, solar thermal
-|   +-- ep-generation/          # PV, wind, fuel cells, batteries, inverters
-|   +-- ep-ground/              # Ground heat transfer (Kiva, slab, basement)
-|   +-- ep-ems/                 # Energy Management System, scripting
-|   +-- ep-demand/              # Demand-side management, load control
-|   +-- ep-output/              # Output variables, meters, reports, SQL
-|   +-- ep-fmi/                 # FMI co-simulation interface
-|   +-- ep-sizing/              # Equipment and system autosizing
-|   +-- ep-sim/                 # Simulation manager, orchestrator
-|   +-- ep-api/                 # C API and Python bindings (PyO3)
-+-- tests/
-|   +-- regression/             # Regression tests against E+ reference outputs
-|   +-- bestest/                # ASHRAE Standard 140 validation
-|   +-- integration/            # Full-model integration tests
-+-- docs/                       # mdBook user guide and engineering reference
-+-- tools/
-|   +-- idf-convert/            # IDF-to-new-format converter
-|   +-- ep-diff/                # Output comparison tool
-```
-
-### 1.3 Type Safety: Physical Units System
-
-A compile-time units system prevents the single most common class of physics bugs:
-mixing incompatible quantities. We use newtypes with zero-cost abstraction.
-
-```rust
-// crates/ep-units/src/lib.rs
-
-use std::ops::{Add, Sub, Mul, Div, Neg};
-
-/// Macro to define a physical quantity newtype wrapping f64.
-macro_rules! quantity {
-    ($name:ident, $unit_str:expr) => {
-        #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default)]
-        #[repr(transparent)]
-        pub struct $name(pub f64);
-
-        impl $name {
-            pub const ZERO: Self = Self(0.0);
-
-            #[inline(always)]
-            pub fn new(val: f64) -> Self { Self(val) }
-
-            #[inline(always)]
-            pub fn value(self) -> f64 { self.0 }
-
-            #[inline(always)]
-            pub fn abs(self) -> Self { Self(self.0.abs()) }
-
-            pub fn is_finite(self) -> bool { self.0.is_finite() }
-        }
-
-        impl Add for $name {
-            type Output = Self;
-            #[inline(always)]
-            fn add(self, rhs: Self) -> Self { Self(self.0 + rhs.0) }
-        }
-
-        impl Sub for $name {
-            type Output = Self;
-            #[inline(always)]
-            fn sub(self, rhs: Self) -> Self { Self(self.0 - rhs.0) }
-        }
-
-        impl Neg for $name {
-            type Output = Self;
-            #[inline(always)]
-            fn neg(self) -> Self { Self(-self.0) }
-        }
-
-        impl Mul<f64> for $name {
-            type Output = Self;
-            #[inline(always)]
-            fn mul(self, rhs: f64) -> Self { Self(self.0 * rhs) }
-        }
-
-        impl Div<f64> for $name {
-            type Output = Self;
-            #[inline(always)]
-            fn div(self, rhs: f64) -> Self { Self(self.0 / rhs) }
-        }
-
-        impl Div<$name> for $name {
-            type Output = f64;
-            #[inline(always)]
-            fn div(self, rhs: $name) -> f64 { self.0 / rhs.0 }
-        }
-
-        impl std::fmt::Display for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "{} {}", self.0, $unit_str)
-            }
-        }
-    };
-}
-
-// Thermodynamic quantities
-quantity!(Temperature, "K");        // Always stored in Kelvin internally
-quantity!(TempDelta, "deltaK");     // Temperature difference (K or degC)
-quantity!(Power, "W");
-quantity!(Energy, "J");
-quantity!(HeatFlux, "W/m2");
-quantity!(ThermalConductivity, "W/(m*K)");
-quantity!(ThermalResistance, "m2*K/W");
-quantity!(SpecificHeat, "J/(kg*K)");
-quantity!(Enthalpy, "J/kg");
-
-// Flow quantities
-quantity!(MassFlowRate, "kg/s");
-quantity!(VolumeFlowRate, "m3/s");
-quantity!(Pressure, "Pa");
-quantity!(Velocity, "m/s");
-
-// Geometry
-quantity!(Area, "m2");
-quantity!(Length, "m");
-quantity!(Angle, "rad");
-
-// Solar/optical
-quantity!(Irradiance, "W/m2");
-quantity!(Illuminance, "lux");
-quantity!(Transmittance, "");       // dimensionless 0..1
-quantity!(Absorptance, "");
-quantity!(Emissivity, "");
-
-// Time
-quantity!(Duration, "s");
-
-// Humidity
-quantity!(HumidityRatio, "kg/kg");
-quantity!(RelativeHumidity, "%");
-quantity!(Density, "kg/m3");
-quantity!(DynamicViscosity, "Pa*s");
-
-// Convenience conversions
-impl Temperature {
-    /// Convert from Celsius to internal Kelvin representation.
-    #[inline(always)]
-    pub fn from_celsius(c: f64) -> Self { Self(c + 273.15) }
-
-    /// Get value in Celsius for display/output.
-    #[inline(always)]
-    pub fn to_celsius(self) -> f64 { self.0 - 273.15 }
-
-    /// Difference between two temperatures yields a TempDelta.
-    #[inline(always)]
-    pub fn delta(self, other: Temperature) -> TempDelta {
-        TempDelta(self.0 - other.0)
-    }
-}
-
-// Cross-quantity operations with explicit typed results
-impl Mul<Area> for HeatFlux {
-    type Output = Power;
-    #[inline(always)]
-    fn mul(self, rhs: Area) -> Power { Power(self.0 * rhs.0) }
-}
-
-impl Mul<Duration> for Power {
-    type Output = Energy;
-    #[inline(always)]
-    fn mul(self, rhs: Duration) -> Energy { Energy(self.0 * rhs.0) }
-}
-
-impl Div<Area> for Power {
-    type Output = HeatFlux;
-    #[inline(always)]
-    fn div(self, rhs: Area) -> HeatFlux { HeatFlux(self.0 / rhs.0) }
-}
-
-impl Mul<MassFlowRate> for Enthalpy {
-    type Output = Power;
-    #[inline(always)]
-    fn mul(self, rhs: MassFlowRate) -> Power { Power(self.0 * rhs.0) }
-}
-```
-
-### 1.4 State Management
-
-The C++ codebase uses a monolithic `EnergyPlusData` god-object with 150+ members.
-The Rust design replaces this with a structured `SimulationState` that groups related
-state and makes ownership explicit.
-
-```rust
-// crates/ep-core/src/state.rs
-
-use crate::time::SimulationClock;
-
-/// Top-level simulation state. Constructed once, passed by mutable reference
-/// through the solver pipeline. Subsystem state is grouped logically.
-pub struct SimulationState {
-    /// Simulation clock and timestep management.
-    pub clock: SimulationClock,
-
-    /// Environment metadata (current design day or weather period).
-    pub environment: EnvironmentState,
-
-    /// Weather data for current timestep.
-    pub weather: WeatherState,
-
-    /// Building geometry and surface state.
-    pub surfaces: SurfaceState,
-
-    /// Zone air state (temperatures, humidity, loads).
-    pub zones: ZoneState,
-
-    /// HVAC air-side system state.
-    pub hvac: HvacState,
-
-    /// Plant loop state (flow rates, temperatures, convergence).
-    pub plant: PlantState,
-
-    /// Output variable registry and current values.
-    pub output: OutputState,
-
-    /// Schedule evaluation cache for current timestep.
-    pub schedules: ScheduleState,
-
-    /// Simulation control flags.
-    pub flags: SimulationFlags,
-
-    /// Diagnostic message accumulator.
-    pub diagnostics: DiagnosticCollector,
-}
-
-/// Control flags replacing EnergyPlus's scattered boolean globals.
-#[derive(Debug, Default)]
-pub struct SimulationFlags {
-    pub warmup: bool,
-    pub sizing: bool,
-    pub begin_environment: bool,
-    pub begin_day: bool,
-    pub begin_hour: bool,
-    pub begin_timestep: bool,
-    pub first_hvac_iteration: bool,
-    pub hvac_converged: bool,
-}
-
-/// Timestep and simulation clock.
-pub struct SimulationClock {
-    pub current_time: chrono::NaiveDateTime,
-    pub time_step: ep_units::Duration,
-    pub hour_of_day: u8,
-    pub timestep_in_hour: u8,
-    pub timesteps_per_hour: u8,
-    pub day_of_year: u16,
-    pub day_of_week: Weekday,
-    pub month: u8,
-    pub day_of_month: u8,
-    pub year: i32,
-    pub is_leap_year: bool,
-}
-```
-
-### 1.5 Component Model: Trait-Based Design
-
-Equipment components implement traits rather than inheriting from a base class.
-This enables static dispatch (zero-cost) for the common case while allowing
-dynamic dispatch (`dyn Trait`) when heterogeneous collections are needed.
-
-```rust
-// crates/ep-core/src/component.rs
-
-use crate::state::SimulationState;
-use ep_units::*;
-
-/// Every HVAC/plant component implements this trait.
-pub trait HvacComponent: Send + Sync {
-    /// Human-readable name for diagnostics.
-    fn name(&self) -> &str;
-
-    /// Component type identifier.
-    fn component_type(&self) -> ComponentType;
-
-    /// Initialize component state at start of environment or after sizing.
-    fn initialize(
-        &mut self,
-        state: &SimulationState,
-        first_hvac_iteration: bool,
-    ) -> Result<(), SimError>;
-
-    /// Run the component model for the current timestep.
-    fn simulate(
-        &mut self,
-        state: &mut SimulationState,
-        first_hvac_iteration: bool,
-        load: Power,
-        run: bool,
-    ) -> Result<(), SimError>;
-
-    /// Return the component's current capacity for load dispatch.
-    fn available_capacity(&self) -> Power;
-}
-
-/// Plant-specific component trait extending HvacComponent.
-pub trait PlantComponent: HvacComponent {
-    /// The plant loop location where this component is connected.
-    fn plant_location(&self) -> PlantLocation;
-
-    /// Water-side flow request for the current timestep.
-    fn design_flow_rate(&self) -> MassFlowRate;
-
-    /// Sizing callback.
-    fn size(&mut self, state: &SimulationState) -> Result<(), SimError>;
-
-    /// Report output variables.
-    fn report(&self, output: &mut OutputState);
-}
-
-/// Identifies a component's location in the plant topology.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PlantLocation {
-    pub loop_index: usize,
-    pub side: LoopSide,
-    pub branch_index: usize,
-    pub component_index: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LoopSide {
-    Supply,
-    Demand,
-}
-```
-
-### 1.6 Solver Orchestration
-
-The main simulation loop mirrors EnergyPlus's nested structure but uses Rust's
-type system to enforce the correct calling sequence.
-
-```rust
-// crates/ep-sim/src/orchestrator.rs
-
-use ep_core::state::SimulationState;
-use ep_core::error::SimResult;
-
-pub struct SimulationOrchestrator {
-    weather_manager: ep_weather::WeatherManager,
-    envelope_solver: ep_envelope::EnvelopeSolver,
-    zone_solver: ep_zone::ZoneAirSolver,
-    hvac_manager: ep_hvac::HvacManager,
-    plant_manager: ep_plant::PlantManager,
-    output_manager: ep_output::OutputManager,
-    sizing_manager: ep_sizing::SizingManager,
-}
-
-impl SimulationOrchestrator {
-    pub fn run(&mut self, state: &mut SimulationState) -> SimResult<()> {
-        self.run_sizing_passes(state)?;
-
-        // Environment loop (design days + weather periods)
-        for env in state.environment.iter_environments() {
-            state.flags.begin_environment = true;
-            self.weather_manager.setup_environment(state, &env)?;
-            self.run_warmup(state)?;
-
-            // Day loop
-            for _day in env.day_range() {
-                state.flags.begin_day = true;
-
-                // Hour loop
-                for hour in 0..24u8 {
-                    state.flags.begin_hour = true;
-                    state.clock.hour_of_day = hour;
-
-                    // Timestep loop
-                    for ts in 0..state.clock.timesteps_per_hour {
-                        state.clock.timestep_in_hour = ts;
-                        state.flags.begin_timestep = true;
-
-                        self.simulate_timestep(state)?;
-
-                        state.flags.begin_timestep = false;
-                        state.flags.begin_hour = false;
-                        state.flags.begin_day = false;
-                    }
-                }
-                state.clock.advance_day();
-            }
-            state.flags.begin_environment = false;
-        }
-
-        self.output_manager.write_final_reports(state)?;
-        Ok(())
-    }
-
-    fn simulate_timestep(&mut self, state: &mut SimulationState) -> SimResult<()> {
-        // 1. Weather
-        self.weather_manager.update(state)?;
-
-        // 2. Envelope heat balance (outside surfaces -> inside surfaces)
-        self.envelope_solver.solve(state)?;
-
-        // 3. Zone air heat balance + HVAC iteration
-        self.solve_hvac_loop(state)?;
-
-        // 4. Reporting
-        self.output_manager.update_timestep(state)?;
-
-        Ok(())
-    }
-
-    fn solve_hvac_loop(&mut self, state: &mut SimulationState) -> SimResult<()> {
-        const MAX_HVAC_ITERATIONS: u32 = 20;
-
-        for iteration in 0..MAX_HVAC_ITERATIONS {
-            state.flags.first_hvac_iteration = iteration == 0;
-
-            // Zone predictor
-            self.zone_solver.predict(state)?;
-
-            // Air-side systems
-            let mut sim_air = true;
-            let mut sim_zone_equip = true;
-            let mut sim_plant = true;
-
-            // Inner HVAC iteration (air loops <-> zone equipment <-> plant)
-            while sim_air || sim_zone_equip || sim_plant {
-                if sim_air {
-                    self.hvac_manager.simulate_air_loops(state)?;
-                }
-                if sim_zone_equip {
-                    self.hvac_manager.simulate_zone_equipment(state)?;
-                }
-                if sim_plant {
-                    self.plant_manager.simulate(
-                        state,
-                        &mut sim_air,
-                        &mut sim_zone_equip,
-                        &mut sim_plant,
-                    )?;
-                }
-            }
-
-            // Zone corrector
-            self.zone_solver.correct(state)?;
-
-            if state.flags.hvac_converged {
-                break;
-            }
-        }
-
-        Ok(())
-    }
-}
-```
-
-### 1.7 Concurrency Model
-
-EnergyPlus is fundamentally sequential within a timestep, but several computations
-are embarrassingly parallel. The Rust engine uses Rayon for data-parallel operations.
-
-**Parallel opportunities identified:**
-
-| Operation | Parallelism Type | Expected Speedup |
-|-----------|-----------------|-----------------|
-| Surface outside heat balance | Per-surface | 2-4x on large models |
-| Solar shading calculations | Per-surface pair | 2-6x |
-| View factor computation (setup) | Per-enclosure | 3-8x |
-| CTF coefficient generation | Per-construction | 2-4x |
-| Daylighting reference points | Per-zone | 2-4x |
-| Parametric/batch runs | Per-run | Near-linear |
-| Weather file preprocessing | Per-month | 2-4x |
-
-```rust
-// Example: parallel surface heat balance using Rayon
-use rayon::prelude::*;
-
-fn calc_outside_surface_heat_balance(
-    surfaces: &mut [SurfaceState],
-    weather: &WeatherState,
-    solar: &SolarState,
-) {
-    surfaces.par_iter_mut().for_each(|surf| {
-        let q_solar = solar.incident_solar(surf.index);
-        let q_lw_sky = calc_sky_longwave(surf, weather);
-        let q_lw_ground = calc_ground_longwave(surf, weather);
-        let h_conv = calc_exterior_convection(surf, weather);
-
-        surf.outside_temp = solve_outside_balance(
-            q_solar, q_lw_sky, q_lw_ground, h_conv, surf,
-        );
-    });
-}
-```
-
-**Determinism guarantee:** Parallel operations must produce bit-identical results
-regardless of thread scheduling. This is achieved by:
-- Using indexed operations (not order-dependent reductions)
-- Avoiding floating-point summation order dependence in parallel reductions
-  (use Kahan summation or sort-before-sum)
-- Providing a `--deterministic` flag that forces sequential execution
-
-### 1.8 Error Handling
-
-EnergyPlus uses `ShowFatalError()` / `ShowSevereError()` / `ShowWarningError()` functions
-that write to stderr and sometimes abort. The Rust engine uses a structured error hierarchy.
-
-```rust
-// crates/ep-core/src/error.rs
-
-use thiserror::Error;
-
-pub type SimResult<T> = Result<T, SimError>;
-
-#[derive(Error, Debug)]
-pub enum SimError {
-    // Fatal errors that abort the simulation
-    #[error("Input error in {object_type} '{object_name}': {message}")]
-    InputError {
-        object_type: String,
-        object_name: String,
-        message: String,
-    },
-
-    #[error("Convergence failure in {solver}: {message}")]
-    ConvergenceError {
-        solver: String,
-        message: String,
-        iterations: u32,
-    },
-
-    #[error("Numerical error: {0}")]
-    NumericalError(String),
-
-    #[error("Weather data error: {0}")]
-    WeatherError(String),
-
-    #[error("File I/O error: {0}")]
-    IoError(#[from] std::io::Error),
-
-    #[error("FMI co-simulation error: {0}")]
-    FmiError(String),
-}
-
-/// Non-fatal diagnostics accumulated during simulation.
-#[derive(Debug, Clone)]
-pub struct Diagnostic {
-    pub level: DiagnosticLevel,
-    pub category: &'static str,
-    pub message: String,
-    /// Source location for traceability.
-    pub location: Option<SourceLocation>,
-    /// Recurrence count (for rate-limiting repeated warnings).
-    pub count: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum DiagnosticLevel {
-    Info,
-    Warning,
-    Severe,
-}
-
-#[derive(Debug, Clone)]
-pub struct SourceLocation {
-    pub file: &'static str,
-    pub line: u32,
-    pub module: &'static str,
-}
-
-/// Collector that rate-limits repeated warnings.
-pub struct DiagnosticCollector {
-    diagnostics: Vec<Diagnostic>,
-    recurring: std::collections::HashMap<String, u32>,
-    max_recurring: u32,
-}
-
-impl DiagnosticCollector {
-    pub fn warn(&mut self, category: &'static str, message: impl Into<String>) {
-        let msg = message.into();
-        let count = self.recurring.entry(msg.clone()).or_insert(0);
-        *count += 1;
-        if *count <= self.max_recurring {
-            self.diagnostics.push(Diagnostic {
-                level: DiagnosticLevel::Warning,
-                category,
-                message: msg,
-                location: None,
-                count: *count,
-            });
-        }
-    }
-
-    pub fn severe(&mut self, category: &'static str, message: impl Into<String>) {
-        self.diagnostics.push(Diagnostic {
-            level: DiagnosticLevel::Severe,
-            category,
-            message: message.into(),
-            location: None,
-            count: 1,
-        });
-    }
-}
-```
-
-### 1.9 Plugin / Extension Model
-
-Users can extend the engine without modifying core code. The trait-based design
-supports three extension mechanisms:
-
-```rust
-// crates/ep-core/src/plugin.rs
-
-/// Trait for user-defined HVAC components loadable at runtime.
-pub trait UserComponent: HvacComponent {
-    /// Called during input processing to configure the component.
-    fn configure(&mut self, params: &serde_json::Value) -> SimResult<()>;
-}
-
-/// Trait for EMS-like scripting callbacks.
-pub trait ScriptCallback: Send + Sync {
-    fn on_calling_point(
-        &mut self,
-        point: CallingPoint,
-        state: &mut SimulationState,
-    ) -> SimResult<()>;
-}
-
-/// Calling points where scripts/plugins can intervene.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CallingPoint {
-    BeginNewEnvironment,
-    AfterWarmup,
-    BeginTimestep,
-    BeforeHvac,
-    AfterHvac,
-    EndTimestep,
-    EndEnvironment,
-    EndSimulation,
-}
-
-/// Registry for dynamically loaded components and callbacks.
-pub struct PluginRegistry {
-    component_factories:
-        HashMap<String, Box<dyn Fn(&serde_json::Value) -> Box<dyn PlantComponent>>>,
-    script_callbacks: Vec<(CallingPoint, Box<dyn ScriptCallback>)>,
-}
-```
+## 1. Current State Assessment
+
+The Rust workspace (`ep-rs/`) contains **33 crates** with **824 passing tests** and **~34,000 lines of Rust**. Phases 0–5 of the original plan are structurally complete. The C++ EnergyPlus codebase is **~800K lines** across 200+ modules.
+
+### 1.1 Completed Work
+
+| Category | Crate(s) | Tests | Status |
+|----------|----------|-------|--------|
+| **Units & Types** | ep-units | 22 | Complete — `quantity!` macro for zero-cost newtypes |
+| **Core Runtime** | ep-core | 14 | Complete — state struct, time management, environment types |
+| **Psychrometrics** | ep-psychrometrics | 31 | Complete — all ASHRAE moist air property functions |
+| **Fluid Properties** | ep-fluids | 8 | Good — water, refrigerant, air property lookups |
+| **Performance Curves** | ep-curves | 41 | Complete — all 21 EnergyPlus curve types |
+| **Weather** | ep-weather | 31 | Good — EPW parsing, design days, solar position |
+| **Schedules** | ep-schedule | 40 | Good — Year/Week/Day/Compact/File schedules |
+| **Materials** | ep-materials | 18 | Good — construction layers, glass optical properties |
+| **I/O Framework** | ep-io | 48 | Good — IDF parser, ~15 object schema defs, macro preprocessor |
+| **Surface Geometry** | ep-surfaces | 20 | Partial — vertices, normals, area, tilt, zone topology; **no heat balance** |
+| **Envelope** | ep-envelope | 36 | Partial — convection correlations, basic CTF; **no radiant exchange solver** |
+| **Window Optics** | ep-windows | 22 | Partial — angular single/multi-pane optics; **thermal solver incomplete** |
+| **Solar Incident** | ep-solar | 16 | Partial — sun position, Perez/HDKR diffuse; **no shadow casting** |
+| **Ground Temp** | ep-ground | 18 | Partial — Kusuda model, monthly interpolation; **no Kiva/3D** |
+| **Zone Air Balance** | ep-zone-air | 19 | Moderate — 3 solution methods, infiltration; **limited HVAC coupling** |
+| **Internal Gains** | ep-internal-gains | 14 | Good — occupancy, lights, equipment with fraction splits |
+| **Airflow Network** | ep-airflow | 24 | Moderate — Newton-Raphson solver; **few component models** |
+| **Daylighting** | ep-daylighting | 50 | Partial — sky luminance, glare, illuminance; **no full daylight factor** |
+| **Node Infrastructure** | ep-nodes | 32 | Complete — node struct, mixer, splitter, OA mixer |
+| **Fans** | ep-fans | 16 | Moderate — constant/variable/on-off; **no detailed performance curves** |
+| **Coils** | ep-coils | 20 | Moderate — basic DX (rated + curves), water (ε-NTU); **simplified** |
+| **Plant Equipment** | ep-plant | 66 | Moderate — boiler, chiller EIR, tower, pump, mixed tank; **no loop solver** |
+| **HVAC Framework** | ep-hvac | 15 | Skeletal — air loop topology, unitary structs; **no control logic** |
+| **EMS** | ep-ems | 42 | Good — ERL execution, sensors, actuators, trends |
+| **FMI** | ep-fmi | 7 | Good — FMI 2.0 co-simulation, variable exchange |
+| **Generation** | ep-generation | 34 | Good — PV, wind, battery (KiBaM), generators, inverter |
+| **Demand** | ep-demand | 21 | Good — demand managers, tariffs, life cycle cost |
+| **Refrigeration** | ep-refrigeration | 25 | Good — display cases, walk-ins, compressors, condensers |
+| **Water Systems** | ep-water | 21 | Good — storage heater, tankless, solar thermal, fixtures |
+| **API** | ep-api | 6 | Good — C FFI, variable registration, callbacks |
+| **Output** | ep-output | 43 | Good — variables, meters, ESO/MTR/CSV/SQL writers, tabular |
+| **Simulation Driver** | ep-sim | 48 | Good framework — warmup, convergence, sizing; **run loop stubbed** |
+| **Validation** | ep-validation | 20 | Good — BESTEST cases, numerical comparison, regression |
+
+### 1.2 Key Insight
+
+All 824 tests pass because they test individual components **in isolation**. The core simulation engine — surface heat balance, HVAC system iteration, plant loop convergence, and the timestep driver — is not yet functional as an integrated system. The crates are well-architected building blocks that need to be wired together.
 
 ---
 
-## 2. Module Decomposition
+## 2. Gap Analysis
 
-### 2.1 Weather Processing (`ep-weather`)
+### 2.1 Critical Path Blockers
 
-**Scope:** EnergyPlus files: `WeatherManager.cc/hh` (8,867 lines), `DataEnvironment.hh`,
-ground temperature models in `GroundTemperatureModeling/` directory (5 model implementations).
+These items must be completed before any IDF file can run end-to-end:
 
-**Key algorithms:**
-- EPW file parsing (TMY3 format, hourly or sub-hourly records)
-- Solar position: Spencer's equations for declination, equation of time, hour angle
-  (Engineering Reference Section: Climate Calculations)
-- Sky models: Perez anisotropic sky diffuse model, isotropic, HDKR
-- Ground temperatures: Kusuda-Achenbach correlation, Xing model, finite-difference 1D
-- Sky temperature: Clark-Allen, Brunt, Idso, Berdahl-Martin correlations
-- Design day generation: ASHRAE clear-sky solar model, Zhang-Huang, Tau/Tau2017
-- Water mains temperature: correlation and schedule-based
+| Blocker | What's Missing | C++ Reference | Est. Rust Lines |
+|---------|---------------|---------------|-----------------|
+| Surface heat balance | CTF conduction solver, inside/outside balance | `HeatBalanceSurfaceManager.cc` (10K) | ~2,000 |
+| Radiant exchange | View factor matrix, inter-surface LW exchange | `HeatBalanceIntRadExchange.cc` (2.1K) | ~500 |
+| Window thermal | Multi-layer glass temps, gap convection | `WindowManager.cc` thermal sections (~3K) | ~800 |
+| Shadow casting | Polygon clipping, sunlit fractions | `SolarShading.cc` (13K) | ~1,500 |
+| HVAC air loop | Component sequencing, convergence iteration | `SimAirServingZones.cc` (7.8K) | ~1,500 |
+| Zone equipment | Load calculation, equipment dispatch | `ZoneEquipmentManager.cc` (7.1K) | ~1,000 |
+| Plant loop solver | Half-loop iteration, flow resolution | `Plant/LoopSide.cc` + `PlantManager.cc` (7K) | ~1,200 |
+| Simulation loop | Environment→Day→Hour→Timestep→HVAC loop | `SimulationManager.cc` (~3K) | ~800 |
+| IDF schema | ~50 core object defs (currently ~15) | IDD schema | ~1,500 |
 
-**Rust crate public API sketch:**
+### 2.2 Equipment Model Gap
 
-```rust
-// crates/ep-weather/src/lib.rs
+The C++ codebase has extensive equipment breadth not yet replicated:
 
-pub mod epw;
-pub mod solar_position;
-pub mod sky_models;
-pub mod ground_temperature;
-pub mod design_day;
+| C++ Subsystem | C++ Lines | IDF Object Types | Rust Coverage |
+|---------------|-----------|------------------|---------------|
+| Air terminals (VAV, dual duct, PIU) | ~11K | 13 | None |
+| Unitary systems & furnaces | ~30K | 8+ | Struct stubs only |
+| VRF systems | ~16K | 4 | None |
+| DX coils (multi-speed, two-stage) | ~22K | 10 | Single-speed only |
+| Heat recovery (air-to-air) | ~5K | 4 | None |
+| Zone HVAC (fan coils, baseboards, radiant) | ~30K | 20+ | Struct stubs only |
+| Chillers (7 types) | ~23K | 9 | EIR only |
+| Heat pumps (water-to-water, plant EIR) | ~12K | 6 | None |
+| Ground heat exchangers | ~10K | 5 | None |
+| Thermal storage (ice, stratified tank) | ~16K | 6 | Mixed tank only |
+| Additional towers/coolers | ~10K | 8 | Single-speed tower only |
+| Thermal comfort models | ~3K | 6 models | None |
+| Room air models | ~5K | 5 models | None |
+| CondFD (finite difference conduction) | ~3K | N/A | None |
+| Advanced fenestration (EQL, BSDF) | ~12K | Complex | None |
+| Tabular output reports | ~20K | N/A | Framework only |
+| Sizing (50+ autosizing classes) | ~20K | N/A | Struct stubs |
 
-/// Parsed EPW weather file.
-pub struct WeatherFile {
-    pub location: Location,
-    pub records: Vec<WeatherRecord>,
-    pub design_conditions: Option<DesignConditions>,
-    pub ground_temps: Option<MonthlyGroundTemps>,
-}
+---
 
-/// Single timestep weather data.
-#[derive(Debug, Clone)]
-pub struct WeatherRecord {
-    pub dry_bulb: Temperature,
-    pub wet_bulb: Temperature,
-    pub dew_point: Temperature,
-    pub rel_humidity: RelativeHumidity,
-    pub pressure: Pressure,
-    pub direct_normal_irradiance: Irradiance,
-    pub diffuse_horizontal_irradiance: Irradiance,
-    pub global_horizontal_irradiance: Irradiance,
-    pub wind_speed: Velocity,
-    pub wind_direction: Angle,
-    pub sky_cover: f64,           // 0-10 tenths
-    pub visibility: Length,
-    pub ceiling_height: Length,
-    pub precipitation: f64,       // mm
-    pub snow_depth: Length,
-    pub is_rain: bool,
-    pub is_snow: bool,
-}
+## 3. Phase 6: Core Heat Balance
 
-/// Solar position for a given time and location.
-pub struct SolarPosition {
-    pub altitude: Angle,
-    pub azimuth: Angle,
-    pub zenith: Angle,
-    pub hour_angle: Angle,
-    pub declination: Angle,
-    pub equation_of_time: Duration,
-    pub sun_is_up: bool,
-}
+**Goal:** Solve surface temperatures correctly. A building with opaque walls, roof, and slab should produce converged inside/outside surface temperatures at each timestep.
 
-pub struct WeatherManager {
-    weather_file: Option<WeatherFile>,
-    design_days: Vec<DesignDaySpec>,
-    ground_model: Box<dyn GroundTemperatureModel>,
-}
+**Crates modified:** ep-envelope, ep-surfaces, ep-windows
 
-impl WeatherManager {
-    pub fn load_epw(path: &std::path::Path) -> SimResult<WeatherFile>;
-    pub fn update(&self, state: &mut SimulationState) -> SimResult<()>;
-    pub fn solar_position(
-        lat: Angle, lon: Angle, tz: f64,
-        day_of_year: u16, hour: f64,
-    ) -> SolarPosition;
-    pub fn sky_temperature(weather: &WeatherRecord, model: SkyTempModel) -> Temperature;
-}
+### 3.1 CTF Conduction Solver
 
-pub trait GroundTemperatureModel: Send + Sync {
-    fn temperature_at_depth(
-        &self, depth: Length, day_of_year: u16,
-    ) -> Temperature;
-}
-```
+**File:** `crates/ep-envelope/src/ctf.rs` (expand existing)
 
-**Dependencies:** `ep-units`, `ep-core`
+Complete the Conduction Transfer Function implementation:
 
-**Complexity estimate:**
-- Lines of Rust: ~4,000-5,000
-- Effort: 2-3 person-months
-- Difficulty: Medium
-
-**Migration strategy:** Can be ported and validated independently by comparing
-parsed EPW outputs and solar position calculations against EnergyPlus reference values.
-This is one of the first modules to port since it has no dependencies on HVAC or envelope.
-
-**Risks:**
-- EPW format has many edge cases (missing data markers, non-standard extensions)
-- Solar position precision must match EnergyPlus to within 0.01 degrees for
-  regression testing. Differences in trig implementations between C++ and Rust
-  standard libraries can cause drift.
-- Design day generation has complex humidity/pressure models with 5+ control types
-
-### 2.2 Schedules & Internal Gains (`ep-schedule`)
-
-**Scope:** EnergyPlus files: `ScheduleManager.cc/hh` (large module),
-`InternalHeatGains.cc` (8,823 lines), `DataHeatBalance.hh` (zone gains data).
-
-**Key algorithms:**
-- Schedule hierarchy: Year -> Week (14 day types) -> Day (hourly/sub-hourly values)
-- Compact schedule parsing
-- Interpolation: None (step), Average, Linear
-- File-based schedules (CSV external files)
-- Internal gains: People (activity level, radiant/convective split),
-  Lights (return air fraction), Equipment (electric, gas, steam, hot water, other)
-- Infiltration models: Design flow rate, effective leakage area, flow coefficients
-
-**Rust crate public API sketch:**
+- **State-space response factor method:** Build system matrices [A, B, C, D] from layer thermal properties (conductivity, density, specific heat, thickness)
+- **Exponential matrix:** Padé approximation or Taylor series for matrix exponential `exp(A*Δt)`
+- **CTF coefficient extraction:** Outside[], Cross[], Inside[], Flux[] arrays via matrix regression
+- **History management:** Up to 19 CTF terms with ratio-based cutoff at 1e-13
+- **Adaptive time stepping:** Double timestep until Fourier number satisfies stability criterion
+- **Special cases:** Air gaps (steady-state R-value only), massless layers (resistance only)
 
 ```rust
-// crates/ep-schedule/src/lib.rs
-
-/// A schedule that can be evaluated at any simulation time.
-pub enum Schedule {
-    Constant(f64),
-    Year(YearSchedule),
-    Compact(CompactSchedule),
-    File(FileSchedule),
-    External(ExternalSchedule),   // EMS/FMI actuated
-}
-
-impl Schedule {
-    /// Get the schedule value for the given time.
-    pub fn value_at(&self, clock: &SimulationClock) -> f64;
-
-    /// Get min/max bounds for validation.
-    pub fn bounds(&self) -> (f64, f64);
-}
-
-pub struct YearSchedule {
-    pub name: String,
-    pub schedule_type: Option<ScheduleTypeLimit>,
-    weeks: Vec<WeekRule>,        // Date ranges -> week schedule
-}
-
-pub struct WeekSchedule {
-    days: [DaySchedule; 14],     // One per DayType
-}
-
-pub struct DaySchedule {
-    values: Vec<f64>,            // One per timestep in a day
-    interpolation: Interpolation,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum DayType {
-    Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday,
-    Holiday, SummerDesignDay, WinterDesignDay, CustomDay1, CustomDay2,
-    AllDays, Weekdays, Weekends,
-}
-
-/// Internal heat gain definition for a zone.
-pub struct InternalGain {
-    pub gain_type: GainType,
-    pub schedule: ScheduleRef,
-    pub design_level: Power,
-    pub radiant_fraction: f64,
-    pub convective_fraction: f64,
-    pub latent_fraction: f64,
-    pub return_air_fraction: f64,  // For lights
-    pub carbon_dioxide_rate: f64,  // For people
-}
-
-pub enum GainType {
-    People { activity_schedule: ScheduleRef, count: f64 },
-    Lights,
-    ElectricEquipment,
-    GasEquipment,
-    HotWaterEquipment,
-    SteamEquipment,
-    OtherEquipment,
-    InfiltrationDesignFlowRate {
-        flow_rate: VolumeFlowRate,
-        coefficients: [f64; 4],    // A + B*|Tz-To| + C*WindSpeed + D*WindSpeed^2
-    },
-}
-```
-
-**Dependencies:** `ep-units`, `ep-core`
-
-**Complexity estimate:**
-- Lines of Rust: ~3,000-4,000
-- Effort: 2 person-months
-- Difficulty: Low-Medium
-
-**Migration strategy:** Schedules are self-contained and can be validated by
-comparing evaluated schedule values at every timestep against EnergyPlus output.
-Internal gains feed into the zone heat balance and can be validated via zone
-load comparisons.
-
-**Risks:**
-- Compact schedule parsing is tricky (free-form text with Through/For/Until syntax)
-- 14 day types with DST transitions create edge cases
-- Schedule file I/O must handle various CSV formats and missing data
-
-### 2.3 Surface Heat Balance (`ep-envelope`)
-
-**Scope:** EnergyPlus files: `HeatBalanceSurfaceManager.cc` (10,094 lines),
-`HeatBalanceIntRadExchange.cc`, `HeatBalFiniteDiffManager.cc` (CondFD),
-`HeatBalanceHAMTManager.cc` (HAMT), `HeatBalanceMovableInsulation.cc`,
-`ConvectionCoefficients.cc` (6,610 lines), `Construction.cc`, `Material.cc`,
-`HeatBalanceManager.cc` (6,131 lines).
-
-**Key algorithms:**
-- **CTF (Conduction Transfer Functions):** State-space method for wall conduction.
-  Transforms material layer properties into time-series transfer function
-  coefficients (X, Y, Z series). Uses historical temperature data for fast
-  evaluation. (Engineering Reference: Conduction Transfer Functions)
-- **CondFD (Conduction Finite Difference):** Node-based 1D conduction with
-  Crank-Nicolson or fully-implicit schemes. Supports phase change materials
-  via enthalpy method. (Engineering Reference: Conduction Finite Difference)
-- **HAMT (Heat and Moisture Transfer):** Coupled heat and moisture transport
-  through building materials.
-- **Outside surface heat balance:** Solar absorbed + LW sky radiation +
-  LW ground radiation - convection = conduction flux
-- **Inside surface heat balance:** Internal gains radiation + inter-surface
-  LW exchange + interior convection = conduction flux
-- **Interior radiant exchange:** Enclosure-based view factor method with
-  radiosity formulation.
-- **Convection correlations:** 15+ interior models (TARP, CeilingDiffuser,
-  adaptive), 10+ exterior models (DOE-2, TARP, MoWiTT, adaptive)
-
-**Rust crate public API sketch:**
-
-```rust
-// crates/ep-envelope/src/lib.rs
-
-pub mod ctf;
-pub mod cond_fd;
-pub mod hamt;
-pub mod convection;
-pub mod radiant_exchange;
-pub mod surface_balance;
-
-/// Conduction model selector per surface.
-pub enum ConductionModel {
-    CTF(CtfCoefficients),
-    CondFD(CondFdState),
-    HAMT(HamtState),
-}
-
-/// CTF coefficients for a construction (precomputed during setup).
 pub struct CtfCoefficients {
-    pub outside_coeffs: Vec<f64>,  // X series
-    pub inside_coeffs: Vec<f64>,   // Y series
-    pub cross_coeffs: Vec<f64>,    // Z series
-    pub flux_coeffs: Vec<f64>,     // Phi series
-    pub num_history_terms: usize,
+    pub outside: Vec<f64>,    // X[j]: outside self-response
+    pub cross: Vec<f64>,      // Y[j]: cross-coupling (negative)
+    pub inside: Vec<f64>,     // Z[j]: inside self-response
+    pub flux: Vec<f64>,       // Φ[j]: flux history
+    pub num_terms: usize,
 }
 
-/// Per-surface conduction finite difference state.
-pub struct CondFdState {
-    pub scheme: CondFdScheme,
-    pub nodes: Vec<CondFdNode>,
-    pub node_temps: Vec<Temperature>,
-    pub node_temps_old: Vec<Temperature>,
-    pub node_enthalpies: Vec<Enthalpy>,
+impl CtfCoefficients {
+    pub fn from_construction(layers: &[MaterialLayer], timestep_s: f64) -> Option<Self>;
+    pub fn steady_state_u_value(&self) -> f64;
 }
+```
 
-pub enum CondFdScheme {
-    CrankNicolson,
-    FullyImplicit,
-}
+*C++ reference:* `Construction.cc::calculateTransferFunction()` — state-space method with exponential matrix, gamma calculation, final coefficient extraction.
 
-/// Main envelope solver.
-pub struct EnvelopeSolver {
-    conduction_models: Vec<ConductionModel>,
-    convection_config: ConvectionConfig,
-    radiant_enclosures: Vec<RadiantEnclosure>,
-}
+### 3.2 Surface Heat Balance Manager
 
-impl EnvelopeSolver {
-    /// Solve the complete surface heat balance for one timestep.
-    pub fn solve(&mut self, state: &mut SimulationState) -> SimResult<()> {
-        self.calc_outside_surface_balance(state)?;
-        self.calc_inside_surface_balance(state)?;
-        self.update_thermal_histories(state);
-        Ok(())
-    }
+**File:** `crates/ep-envelope/src/surface_heat_balance.rs` (new)
 
-    /// Outside surface heat balance for all exterior surfaces.
-    fn calc_outside_surface_balance(
-        &mut self, state: &mut SimulationState,
-    ) -> SimResult<()>;
+Implement the coupled inside/outside surface temperature solver:
 
-    /// Inside surface heat balance with radiant exchange iteration.
-    fn calc_inside_surface_balance(
-        &mut self, state: &mut SimulationState,
-    ) -> SimResult<()>;
-}
+**Outside surface balance:**
+```
+q"_out = α_sol * I_sol + h_conv_out * (T_air - T_surf) + h_rad * (T_sky - T_surf)
+       - ε * σ * (T_surf⁴ - T_sky⁴)   [linearized as h_rad term]
+```
 
-/// Convection coefficient calculation.
-pub trait ConvectionModel: Send + Sync {
-    fn interior_coefficient(
-        &self, surface: &SurfaceState, zone: &ZoneAirState,
-    ) -> HeatFlux;
+**Inside surface balance:**
+```
+q"_in = h_conv_in * (T_zone - T_surf) + Σ(h_rad_ij * (T_surf_j - T_surf_i)) + q"_solar_absorbed
+```
 
-    fn exterior_coefficient(
-        &self, surface: &SurfaceState, weather: &WeatherState,
-    ) -> HeatFlux;
-}
+**CTF coupling (inside surface equation):**
+```
+q"_in = X[0]*T_out + Y[0]*T_in + Σ(X[j]*T_out_hist[j] + Y[j]*T_in_hist[j] + Φ[j]*q"_hist[j])
+```
 
-/// Enclosure for radiant exchange calculations.
+Key functions:
+```rust
+pub fn calc_outside_surface_temp(
+    surface: &Surface,
+    ctf: &CtfCoefficients,
+    weather: &HourlyWeather,
+    history: &SurfaceHistory,
+) -> f64;
+
+pub fn calc_inside_surface_temp(
+    surface: &Surface,
+    ctf: &CtfCoefficients,
+    zone_air_temp: f64,
+    radiant_exchange: &[f64],  // net radiant from other surfaces
+    solar_absorbed: f64,
+    history: &SurfaceHistory,
+) -> f64;
+
+pub fn solve_zone_surfaces(
+    zone: &Zone,
+    surfaces: &mut [SurfaceState],
+    zone_air_temp: f64,
+    weather: &HourlyWeather,
+) -> ZoneHeatBalanceResult;
+```
+
+*C++ reference:* `HeatBalanceSurfaceManager.cc` — `CalcHeatBalanceInsideSurf2()`, `CalcOutsideSurfTemp()`.
+
+### 3.3 Interior Radiant Exchange
+
+**File:** `crates/ep-envelope/src/radiant_exchange.rs` (new)
+
+Implement inter-surface long-wave radiation exchange within an enclosure:
+
+- **View factors:** Area-weighted approximation for rectangular enclosures (F_ij = A_j / Σ A_k for diffuse enclosure). Optional: exact view factor formulas for parallel/perpendicular rectangles.
+- **ScriptF matrix** (Hottel method): Accounts for emissivity and multiple reflections.
+  ```
+  ScriptF[i,j] = F[i,j] * ε_j / (1 - (1-ε_i)*Σ(F[i,k]*(1-ε_k)))
+  ```
+- **Radiosity solve:** For N surfaces, solve NxN linear system for radiosities, then compute net flux per surface.
+- **Carroll MRT method** (simplified alternative): Mean Radiant Temperature approach requiring only per-surface resistance calculation.
+
+```rust
 pub struct RadiantEnclosure {
     pub surface_indices: Vec<usize>,
-    pub view_factors: ndarray::Array2<f64>,
-    pub script_f: ndarray::Array2<f64>,  // Radiosity script-F matrix
+    pub view_factors: Vec<Vec<f64>>,  // F[i][j]
+    pub script_f: Vec<Vec<f64>>,       // ScriptF[i][j]
+}
+
+impl RadiantEnclosure {
+    pub fn from_surfaces(surfaces: &[&Surface]) -> Self;
+    pub fn calc_exchange(&self, surface_temps: &[f64], emissivities: &[f64]) -> Vec<f64>;
 }
 ```
 
-**Dependencies:** `ep-units`, `ep-core`, `ep-materials`, `ep-surfaces`, `ep-solar`
+*C++ reference:* `HeatBalanceIntRadExchange.cc` — `CalcInteriorRadExchange()`, ScriptF computation.
 
-**Complexity estimate:**
-- Lines of Rust: ~12,000-15,000
-- Effort: 6-8 person-months
-- Difficulty: **Very High**
+### 3.4 Window Thermal Solver
 
-**Migration strategy:** This is the most critical and complex subsystem. Port in stages:
-1. CTF coefficient generation (can validate against E+ CTF output reports)
-2. Outside surface heat balance (validate surface temperatures)
-3. Interior radiant exchange (validate view factors, then enclosure loads)
-4. Inside surface heat balance (validate zone loads)
-5. CondFD and HAMT as secondary methods
+**File:** `crates/ep-windows/src/thermal.rs` (expand existing)
 
-**Risks and challenges:**
-- CTF state-space method involves matrix eigenvalue decomposition with
-  numerical stability concerns for thin/high-conductivity layers
-- Interior radiant exchange requires solving a coupled system across all
-  surfaces in an enclosure; the view factor matrix must be properly normalized
-- Convection coefficient selection logic is extremely complex with 30+ models
-  and adaptive selection algorithms
-- The predictor step feeds from HVAC back into surface balance, creating
-  a tight coupling loop
-- Floating-point reproducibility: CTF history arrays accumulate over
-  many timesteps; small differences compound
+Implement iterative solution for glass layer temperatures:
 
-### 2.4 Fenestration & Window Models (`ep-windows`)
-
-**Scope:** EnergyPlus files: `WindowManager.cc` (8,564 lines),
-`WindowComplexManager.cc`, `WindowEquivalentLayer.cc` (8,108 lines),
-`WindowManagerExteriorThermal.cc`, `WindowManagerExteriorOptical.cc`,
-`DataSurfaces.hh` (window-specific structs), integration with
-Windows-CalcEngine (Tarcog) third-party library.
-
-**Key algorithms:**
-- Multi-layer glazing optics: layer-by-layer transmittance, reflectance, absorptance
-  using spectral data at 107 wavelength points (solar) and 81 points (photopic)
-- Angular dependence: 10 incidence angles (0-90 degrees) with polynomial fits
-- Gap gas properties: convection and conduction across glazing gaps (air, argon, krypton)
-- Shading devices: blinds (slat angle), shades, screens, switchable glazing
-- BSDF (Bidirectional Scattering Distribution Function) for complex fenestration:
-  145-direction hemisphere sampling
-- Window frame and divider thermal bridging
-- Tarcog integration for ISO 15099 thermal calculations
-- Solar distribution through windows onto interior surfaces
-
-**Rust crate public API sketch:**
+- **System of equations:** For N glass layers, solve 2N equations (inside + outside face of each layer)
+- **Gap gas properties:** Temperature-dependent conductivity, viscosity, density, Prandtl number (polynomial fits for air, argon, krypton, xenon, custom gas mixes)
+- **Gap Nusselt number:** Natural convection in sealed vertical gaps (Elsherbiny correlation for aspect ratio effects)
+- **Frame/divider:** Conductive heat transfer through frame/divider elements (1D conduction with area fractions)
+- **Condensation check:** Flag when inside glass surface temperature drops below dew point
 
 ```rust
-// crates/ep-windows/src/lib.rs
+pub fn solve_window_heat_balance(
+    window: &WindowConstruction,
+    exterior_conditions: &ExteriorConditions,
+    interior_conditions: &InteriorConditions,
+) -> WindowThermalResult;
 
-pub mod glazing;
-pub mod spectral;
-pub mod thermal;
-pub mod shading;
-pub mod bsdf;
-pub mod frame;
-
-/// Complete window system definition.
-pub struct WindowSystem {
-    pub layers: Vec<GlazingLayer>,
-    pub gaps: Vec<GasGap>,
-    pub frame: Option<FrameProperties>,
-    pub divider: Option<DividerProperties>,
-    pub shading: Option<ShadingDevice>,
-}
-
-/// Single glazing layer with spectral properties.
-pub struct GlazingLayer {
-    pub thickness: Length,
-    pub conductivity: ThermalConductivity,
-    pub emissivity_front: Emissivity,
-    pub emissivity_back: Emissivity,
-    /// Spectral data: (wavelength_um, transmittance, reflectance_front, reflectance_back)
-    pub spectral_data: Option<Vec<SpectralPoint>>,
-    /// Angle-dependent properties (10 angles from 0 to 90 degrees).
-    pub angular_properties: AngularProperties,
-}
-
-/// Window thermal state for a single timestep.
-pub struct WindowThermalState {
-    pub layer_temperatures: Vec<Temperature>,  // Front and back of each layer
-    pub heat_gain: Power,
-    pub heat_loss: Power,
-    pub solar_transmittance: f64,
-    pub visible_transmittance: f64,
-    pub u_value: f64,               // W/(m2*K)
-    pub shgc: f64,                  // Solar Heat Gain Coefficient
-}
-
-pub trait WindowModel: Send + Sync {
-    fn calc_solar_properties(
-        &self, cos_incidence: f64,
-    ) -> WindowSolarProperties;
-
-    fn calc_thermal_balance(
-        &mut self,
-        exterior_temp: Temperature,
-        interior_temp: Temperature,
-        incident_solar: Irradiance,
-        wind_speed: Velocity,
-        interior_ir: HeatFlux,
-    ) -> SimResult<WindowThermalState>;
+pub struct WindowThermalResult {
+    pub glass_temps: Vec<f64>,     // temperature of each glass face
+    pub gap_temps: Vec<f64>,       // mean temperature of each gap
+    pub heat_flow_in: f64,         // W/m² into zone
+    pub solar_absorbed: Vec<f64>,  // solar absorbed per layer
 }
 ```
 
-**Dependencies:** `ep-units`, `ep-core`, `ep-materials`, `ep-solar`
+*C++ reference:* `WindowManager.cc` — `CalcWindowHeatBalance()`, gap gas property functions.
 
-**Complexity estimate:**
-- Lines of Rust: ~10,000-12,000
-- Effort: 5-7 person-months
-- Difficulty: **Very High**
+### 3.5 Convection Coefficients
 
-**Migration strategy:** Start with simple single-pane windows, then multi-pane,
-then add shading devices, then BSDF. Validate against Window 7 / LBNL reference
-data and EnergyPlus window output reports.
+**File:** `crates/ep-envelope/src/convection.rs` (expand existing)
 
-**Risks:**
-- Spectral integration requires careful numerical quadrature
-- BSDF matrix operations are large (145x145 per layer pair)
-- Tarcog/Windows-CalcEngine is complex C++ code; may need FFI during transition
-- Angular interpolation must exactly match E+ behavior for regression testing
+Add remaining correlations needed for the heat balance:
 
-### 2.5 Solar & Shading Calculations (`ep-solar`)
+**Interior (currently partial — add):**
+- Walton unstable/stable correlations for tilted surfaces
+- Ceiling diffuser correlation (Fisher)
+- Enhanced model selection algorithm (automatically picks best correlation based on surface tilt, delta-T sign, and zone HVAC type)
 
-**Scope:** EnergyPlus files: `SolarShading.cc` (13,085 lines),
-`SolarReflectionManager.cc`, integration with Penumbra library (OpenGL shading).
+**Exterior (currently partial — add):**
+- MoWiTT correlation (wind direction dependent)
+- Simplified combined coefficient (ASHRAE default: 17.8 W/m²K for exposed, 8.3 for sheltered)
+- Surface roughness multiplier table (6 roughness categories)
+- Terrain-dependent local wind speed: `V_local = V_met * (δ_met/H_met)^α_met * (H/δ)^α`
 
-**Key algorithms:**
-- Sun position calculation (Spencer, NREL SPA algorithm)
-- Shadow casting: polygon clipping (Weiler-Atherton) for sunlit area determination
-- Penumbra GPU-accelerated shadow calculation (optional)
-- Anisotropic sky diffuse: Perez model decomposition into circumsolar,
-  horizon brightening, and isotropic components
-- Solar distribution: tracking beam solar through windows onto interior surfaces
-- Reflected solar from ground and obstructions
-- Shading surface schedule interaction
+*C++ reference:* `ConvectionCoefficients.cc` (6,610 lines) — the ~20 most important correlations.
 
-**Rust crate public API sketch:**
+### Phase 6 Tests (~60 new)
+
+- CTF generation: single concrete layer → known U-value, known number of terms
+- CTF generation: multi-layer brick+insulation → cross-coupling sum ≈ U
+- CTF generation: air gap → steady-state R-only (no CTF terms needed)
+- CTF generation: heavy wall (200mm concrete) → more terms than light wall
+- Surface heat balance: steady-state with known outside conditions → T_surface within 0.1°C
+- Surface heat balance: step response (suddenly apply solar) → correct transient
+- Radiant exchange: 2 parallel surfaces at different temps → known net flux
+- Radiant exchange: 6-surface box enclosure → flux sum = 0 (energy conservation)
+- Window thermal: single glazing at known conditions → known heat flow
+- Window thermal: double glazing with argon → lower U than air
+- Convection: all interior correlations at known ΔT → within 10% of published values
+- Convection: all exterior correlations at known wind speed → within 10% of published values
+
+**Exit criteria:** A simple rectangular zone (4 walls + roof + floor) with known construction and weather, no HVAC — surface temperatures converge and zone energy balance closes to < 1%.
+
+---
+
+## 4. Phase 7: Solar, Shading & Daylighting
+
+**Goal:** Correctly distribute solar gains through windows onto interior surfaces, accounting for exterior obstructions. Required for any simulation with windows.
+
+**Crates modified:** ep-solar, ep-daylighting, ep-windows
+
+### 4.1 Shadow Casting
+
+**File:** `crates/ep-solar/src/shading.rs` (replace empty stub)
+
+Implement exterior shadow calculations:
+
+- **Polygon clipping:** Sutherland-Hodgman algorithm for clipping one polygon against another
+- **Shadow projection:** Project each shading surface onto each receiving surface using sun vector
+- **Shading combinations:** Pre-compute which surface pairs can potentially shade each other (azimuth/tilt filter for performance)
+- **Sunlit fraction:** Per receiving surface per hour, fraction of area in direct sun
+- **Shading surface types:** Detached shading (overhangs, fins, trees), building self-shading
+- **Time integration:** Hourly shadow calculations (sub-hourly interpolation optional)
 
 ```rust
-// crates/ep-solar/src/lib.rs
+pub fn compute_sunlit_fractions(
+    surfaces: &[Surface],
+    shading_surfaces: &[ShadingSurface],
+    sun_position: &SunPosition,
+) -> Vec<f64>;  // sunlit fraction per surface [0.0, 1.0]
 
-pub mod position;
-pub mod shading;
-pub mod diffuse_sky;
-pub mod distribution;
-pub mod reflection;
+fn clip_polygon(subject: &[Point3D], clip: &[Point3D]) -> Vec<Point3D>;
+fn project_shadow(shading: &ShadingSurface, receiving: &Surface, sun: &SunPosition) -> Vec<Point3D>;
+```
 
-pub struct SolarCalculator {
-    shading_engine: Box<dyn ShadingEngine>,
-    sky_model: SkyDiffuseModel,
-}
+*C++ reference:* `SolarShading.cc` — `DeterminePolygonOverlap()`, `DetermineShadingCombinations()`.
 
-pub trait ShadingEngine: Send + Sync {
-    /// Calculate the sunlit fraction for each surface at the given sun position.
-    fn calculate_sunlit_fractions(
-        &mut self,
-        surfaces: &[SurfaceGeometry],
-        sun_position: &SolarPosition,
-    ) -> Vec<f64>;
-}
+### 4.2 Solar Distribution
 
-/// Software polygon-clipping shading engine (always available).
-pub struct PolygonClipShadingEngine;
+**File:** `crates/ep-solar/src/distribution.rs` (new)
 
-/// GPU-accelerated shading engine (optional, requires OpenGL).
-#[cfg(feature = "gpu-shading")]
-pub struct GpuShadingEngine { /* Penumbra-equivalent */ }
+Distribute solar radiation to interior surfaces:
 
-pub enum SkyDiffuseModel {
-    Isotropic,
-    Perez,
-    HDKR,    // Hay-Davies-Klucher-Reindl
-}
+- **Beam through windows:** `Q_beam = I_beam * τ_beam(θ) * A_window * sunlit_fraction`
+- **Interior beam distribution:** Track where beam falls on floor/walls (area-weighted initially; later: geometric projection)
+- **Diffuse through windows:** `Q_diff = (I_sky_diff + I_ground_diff) * τ_diff_hemi * A_window`
+- **Absorbed by opaque exterior:** `Q_abs = α_sol * (I_beam * sunlit + I_diff) * A_surface`
+- **Solar to zone air:** Small convective fraction of absorbed solar (typically 0.0)
 
-/// Incident solar radiation on a surface.
-#[derive(Debug, Clone)]
-pub struct SurfaceSolarIncident {
-    pub beam: Irradiance,
-    pub diffuse_sky: Irradiance,
-    pub diffuse_ground: Irradiance,
-    pub reflected: Irradiance,
-    pub total: Irradiance,
-    pub cos_incidence: f64,
-    pub sunlit_fraction: f64,
+```rust
+pub fn distribute_solar(
+    zone: &Zone,
+    surfaces: &[Surface],
+    windows: &[Window],
+    solar: &IncidentSolar,
+    sunlit_fractions: &[f64],
+) -> SolarDistributionResult;
+
+pub struct SolarDistributionResult {
+    pub surface_absorbed: Vec<f64>,  // W absorbed per surface (exterior + interior)
+    pub transmitted_beam: Vec<f64>,  // W beam transmitted per window
+    pub transmitted_diff: Vec<f64>,  // W diffuse transmitted per window
+    pub zone_beam_solar: f64,        // total beam entering zone
+    pub zone_diff_solar: f64,        // total diffuse entering zone
 }
 ```
 
-**Dependencies:** `ep-units`, `ep-core`, `ep-weather`, `ep-surfaces`
+### 4.3 Window Shading Devices
 
-**Complexity estimate:**
-- Lines of Rust: ~6,000-8,000
-- Effort: 4-5 person-months
-- Difficulty: High
+**File:** `crates/ep-windows/src/shading.rs` (new)
 
-**Migration strategy:** Solar position is straightforward; shading calculations
-can be validated surface-by-surface against EnergyPlus shadow reports.
+Implement interior/exterior window attachments:
 
-**Risks:**
-- Polygon clipping algorithms have numerous degenerate cases (coplanar surfaces,
-  near-zero-area slivers, numerical precision at polygon edges)
-- Shading calculations run at a different frequency than the main timestep
-  (often hourly or every N timesteps); must handle caching correctly
-- GPU shading path adds an optional dependency that complicates CI
+- **Interior shade:** Reduce transmitted solar by shade transmittance, add radiant gain from absorbed
+- **Interior blind:** Slat geometry (angle, width, spacing), beam profile angle calculation, view factors between adjacent slats
+- **Exterior screen:** Beam transmittance from openness factor, diffuse transmittance
+- **Shading control:** Schedule-based on/off, solar setpoint (deploy when incident exceeds threshold), glare-based (from daylighting)
 
-### 2.6 Daylighting (`ep-daylighting`)
+### 4.4 Enhanced Daylighting
 
-**Scope:** EnergyPlus files: `DaylightingManager.cc` (10,099 lines),
-`DaylightingDevices.cc`, `DataDaylighting.hh`, integration with DElight library.
+**Files:** `crates/ep-daylighting/src/` (expand existing modules)
 
-**Key algorithms:**
-- Split-flux method: Splits interior illuminance into direct-sun, sky, and
-  inter-reflected components using daylight factors
-- Radiosity-based inter-reflection for complex geometries
-- Glare calculation: DGI (Daylight Glare Index), simplified DGP
-- Daylight control: continuous dimming, stepped, on/off based on illuminance setpoints
-- Tubular Daylighting Devices (TDD): dome transmittance, pipe losses, diffuser output
-- Reference point illuminance calculation with obstruction handling
+Complete the daylight factor method:
 
-**Rust crate public API sketch:**
+- **Sky discretization:** 145 sky patches covering the hemisphere (Tregenza/CIE scheme)
+- **Luminous efficacy:** Direct and diffuse efficacy from solar altitude (Perez model)
+- **Interior illuminance:** Window luminance × daylight factor × window area / reference-point distance²
+- **Interior reflections:** First-bounce reflectance from floor/walls/ceiling (split-flux method)
+- **Reference points:** Multiple reference points per zone, each with independent illuminance calculation
+- **Glare calculation:** Daylight Glare Probability from window luminance and background luminance
+- **Control response:** Continuous dimming (linear power reduction) or stepped (discrete levels)
+
+### Phase 7 Tests (~50 new)
+
+- Polygon clipping: rectangle vs. triangle → known overlap area
+- Sunlit fraction: south wall with overhang at solstice → known fraction
+- Solar through window: south-facing at noon equinox → known transmitted W
+- Interior distribution: total absorbed by all surfaces = total transmitted (conservation)
+- Shading device: interior shade with τ=0.5 reduces transmitted by ~50%
+- Blind: slat angle 45° vs 0° → different beam transmittance
+- Daylight factor: simple room with known geometry → factor within 10% of hand calculation
+- Glare index: large bright window → high DGI; small window → low DGI
+- Lighting control: illuminance > setpoint → power reduced to minimum
+
+**Exit criteria:** BESTEST Case 600 (south-facing windows) produces hourly solar gains within 5% of EnergyPlus C++ reference output.
+
+---
+
+## 5. Phase 8: HVAC Integration
+
+**Goal:** Implement air-side HVAC so zone loads drive equipment. A single-zone system with fan + cooling coil + heating coil converges to meet zone setpoint.
+
+**Crates modified:** ep-hvac, ep-coils, ep-fans, ep-nodes
+
+### 5.1 Air Loop Solver
+
+**File:** `crates/ep-hvac/src/air_loop.rs` (expand)
+
+Implement the air handler simulation sequence:
+
+```
+OA Mixer → Heating Coil → Cooling Coil → Fan → Supply Duct → Zone
+                                                              ↓
+Zone Return → Return Duct → [Relief/Recirculation] → OA Mixer
+```
+
+- **Component-by-component simulation:** Each component reads inlet node, modifies state, writes outlet node
+- **Supply air temperature tracking:** Enthalpy/humidity through the chain
+- **Convergence iteration:** Simulate loop 2-4 times until supply conditions stabilize (residual < tolerance)
+- **Outside air mixing:** `T_mix = (1-OA_frac)*T_return + OA_frac*T_outdoor`
 
 ```rust
-// crates/ep-daylighting/src/lib.rs
-
-pub struct DaylightingZone {
-    pub reference_points: Vec<ReferencePoint>,
-    pub control: DaylightControl,
-    pub windows: Vec<DaylightWindow>,
+pub struct AirLoopSimulator {
+    pub components: Vec<Box<dyn AirLoopComponent>>,
+    pub nodes: NodeManager,
+    pub max_iterations: usize,
+    pub tolerance: f64,
 }
 
-pub struct ReferencePoint {
-    pub position: [f64; 3],        // x, y, z in zone coordinates
-    pub illuminance_setpoint: Illuminance,
-    pub fraction_controlled: f64,
-}
-
-pub enum DaylightControl {
-    Continuous { min_power_fraction: f64, min_light_fraction: f64 },
-    Stepped { steps: u32 },
-    OnOff,
-}
-
-pub struct DaylightingManager {
-    zones: Vec<DaylightingZone>,
-    daylight_factors: Vec<DaylightFactors>,  // Precomputed per window/ref point
-}
-
-impl DaylightingManager {
-    /// Precompute daylight factors (called once during setup).
-    pub fn compute_daylight_factors(
-        &mut self,
-        surfaces: &SurfaceState,
-        solar: &SolarState,
-    ) -> SimResult<()>;
-
-    /// Calculate illuminance and electric lighting reduction for timestep.
-    pub fn calculate(
-        &self,
-        state: &mut SimulationState,
-    ) -> SimResult<Vec<LightingReduction>>;
+pub trait AirLoopComponent {
+    fn simulate(&mut self, nodes: &mut NodeManager, first_hvac_iter: bool);
+    fn inlet_node(&self) -> NodeIndex;
+    fn outlet_node(&self) -> NodeIndex;
 }
 ```
 
-**Dependencies:** `ep-units`, `ep-core`, `ep-solar`, `ep-windows`, `ep-surfaces`
+*C++ reference:* `SimAirServingZones.cc` — `SimAirLoops()`, component dispatch.
 
-**Complexity estimate:**
-- Lines of Rust: ~5,000-7,000
-- Effort: 4-5 person-months
-- Difficulty: High
+### 5.2 Zone Equipment Manager
 
-**Migration strategy:** Validate daylight factors against DElight reference data
-and EnergyPlus daylighting output. Start with simple split-flux, then add
-radiosity inter-reflection.
+**File:** `crates/ep-hvac/src/zone_equipment.rs` (expand)
 
-**Risks:**
-- Daylight factor precomputation is geometry-intensive
-- Glare calculations involve view-direction-dependent luminance maps
-- DElight integration may require FFI bridge during transition
+- **Zone load calculation:** From zone air balance, compute sensible and latent loads:
+  ```
+  Q_sensible = TempDepCoef * T_zone + TempIndCoef  [from ep-zone-air]
+  Q_latent = similar moisture balance
+  ```
+- **Equipment sequencing:** Process zone equipment in priority order (user-specified heating/cooling priority)
+- **Equipment output:** Each zone equipment returns delivered sensible/latent capacity
+- **Return air management:** Collect return air from all zones served by an air loop
 
-### 2.7 Zone Air Heat Balance (`ep-zone`)
+### 5.3 Setpoint Managers
 
-**Scope:** EnergyPlus files: `ZoneTempPredictorCorrector.cc` (7,222 lines),
-`ZoneEquipmentManager.cc` (7,098 lines), `HeatBalanceAirManager.cc`,
-`ZoneContaminantPredictorCorrector.cc`, `DataZoneEquipment.hh`.
+**File:** `crates/ep-hvac/src/setpoint.rs` (expand from enum stubs to implementations)
 
-**Key algorithms:**
-- **Predictor-corrector method:** First predicts zone load assuming
-  prior-timestep conditions, then corrects after HVAC system simulation
-  (Engineering Reference: Zone Air Heat Balance)
-- Zone air energy balance: Q_sys + Q_surfaces + Q_internal + Q_infiltration +
-  Q_mixing + Q_ventilation = rho*V*Cp*(dT/dt)
-- Numerical schemes: 3rd-order backward difference (default), Euler,
-  analytical solution
-- Zone mixing and cross-mixing between zones
-- Return air path calculations
-- Moisture balance (humidity ratio predictor-corrector)
-- CO2/generic contaminant balance
-
-**Rust crate public API sketch:**
+- **Scheduled:** Read supply air temperature from schedule
+- **Outside air reset:** Linear interpolation between two (OA temp, supply temp) pairs
+- **Warmest/coldest zone:** Track warmest/coldest zone temperature, calculate required supply temperature
+- **Single zone reheat:** Dedicated OA temperature tracking for single-zone systems
 
 ```rust
-// crates/ep-zone/src/lib.rs
-
-pub struct ZoneAirSolver {
-    zones: Vec<ZoneAirState>,
-    solver_type: ZoneAirSolverType,
-    history_depth: usize,           // 3 for 3rd-order backward difference
-}
-
-pub enum ZoneAirSolverType {
-    ThirdOrderBackwardDifference,
-    EulerMethod,
-    AnalyticalSolution,
-}
-
-pub struct ZoneAirState {
-    pub temperature: Temperature,
-    pub humidity_ratio: HumidityRatio,
-    pub co2_concentration: Option<f64>,
-
-    // Historical values for multi-step methods
-    temp_history: [Temperature; 4],
-    humidity_history: [HumidityRatio; 4],
-
-    // Loads
-    pub system_sensible_load: Power,
-    pub system_latent_load: Power,
-    pub surface_convective_load: Power,
-    pub internal_convective_load: Power,
-    pub infiltration_load: Power,
-    pub mixing_load: Power,
-    pub ventilation_load: Power,
-
-    // Zone parameters
-    pub volume: f64,                  // m3
-    pub multiplier: f64,
-    pub air_mass: f64,                // kg
-}
-
-impl ZoneAirSolver {
-    /// Predictor step: estimate zone load based on current conditions.
-    pub fn predict(&mut self, state: &mut SimulationState) -> SimResult<()>;
-
-    /// Corrector step: update zone temperature after HVAC response.
-    pub fn correct(&mut self, state: &mut SimulationState) -> SimResult<()>;
+pub trait SetpointManager {
+    fn calculate_setpoint(&self, state: &SimulationState) -> f64;
+    fn node_index(&self) -> NodeIndex;
 }
 ```
 
-**Dependencies:** `ep-units`, `ep-core`, `ep-schedule`, `ep-psychrometrics`
+### 5.4 Air Terminals (VAV Boxes)
 
-**Complexity estimate:**
-- Lines of Rust: ~6,000-8,000
-- Effort: 4-5 person-months
-- Difficulty: High
+**File:** `crates/ep-hvac/src/terminal.rs` (new)
 
-**Migration strategy:** Validate by comparing zone temperatures and loads
-timestep-by-timestep against EnergyPlus. Start with simple single-zone models,
-then add mixing and multi-zone.
+Implement the 4 most common terminal types:
 
-**Risks:**
-- The predictor-corrector creates a tight feedback loop with HVAC; the zone solver
-  cannot be validated in isolation from at least ideal-loads HVAC
-- Third-order backward difference requires careful initialization during warmup
-- Zone mixing creates inter-zone coupling that complicates parallel execution
+- **VAV:Reheat:** Variable air flow (min to max), reheat coil modulates to meet zone heating load
+  - Below cooling setpoint: minimum flow + reheat
+  - Above cooling setpoint: increase flow, no reheat
+  - Damper position = max(min_flow, load / capacity)
+- **VAV:NoReheat:** Same damper logic, no reheat coil
+- **ConstantVolume:Reheat:** Fixed flow, reheat coil modulates
+- **ConstantVolume:NoReheat:** Pure pass-through at fixed flow
 
-### 2.8 HVAC Air-Side Systems (`ep-hvac`)
+*C++ reference:* `SingleDuct.cc` (5,859 lines) — 4 core types in ~2K lines.
 
-**Scope:** EnergyPlus files (partial list of the largest): `UnitarySystem.cc` (18,344 lines),
-`DXCoils.cc` (18,068 lines), `Furnaces.cc` (11,199 lines),
-`HVACVariableRefrigerantFlow.cc` (15,565 lines), `SimAirServingZones.cc` (7,767 lines),
-`VariableSpeedCoils.cc` (7,723 lines), `WaterCoils.cc` (6,375 lines),
-`SingleDuct.cc` (5,859 lines), `MixedAir.cc`, `Fans.cc`, `Humidifiers.cc`,
-`HeatRecovery.cc`, `HVACManager.cc`, `HVACControllers.cc`,
-`SetPointManager.cc`, `SystemAvailabilityManager.cc`,
-plus `Coils/` directory (CoilCoolingDX, CoilCoolingDXCurveFitSpeed, etc.),
-`Autosizing/` directory (44 files).
+### 5.5 Controllers
 
-This is the largest subsystem by far, totaling over **100,000 lines** of C++ code.
+**File:** `crates/ep-hvac/src/controller.rs` (expand from stubs)
 
-**Key algorithms:**
-- Fan models: constant volume, VAV (variable air volume), on/off, component model
-  with motor/belt/VFD losses
-- Cooling coil models: DX single/multi-speed, DX variable speed, chilled water,
-  evaporative coolers
-- Heating coil models: electric, gas, DX heat pump, hot water, steam, desuperheater
-- Unitary systems: packaged DX equipment, furnaces, heat pumps (air-to-air,
-  water-to-air), VRF (variable refrigerant flow)
-- Air handling units: mixing box (OA/return), supply fan, cooling coil, heating coil,
-  humidifier, heat recovery
-- Air terminal units: single duct VAV, dual duct, induction, powered
-- Controller logic: PI control, setpoint managers (scheduled, OA reset,
-  warmest/coldest, follow-OA, return-air)
-- System availability: night cycle, optimum start, scheduled, differential thermostat
+- **Water coil controller:** PID or bisection to find water flow rate that achieves target outlet air temperature
+- **OA controller:** Economizer logic — increase OA fraction when OA is cooler/drier than return, subject to min ventilation
+- **Demand-controlled ventilation:** Adjust minimum OA based on occupancy (CO₂ setpoint or per-person flow)
 
-**Rust crate public API sketch:**
+### 5.6 Enhanced Coil Models
+
+**File:** `crates/ep-coils/src/dx.rs` (expand)
+
+- **Temperature-dependent SHR:** SHR varies with entering conditions (dry-bulb, wet-bulb)
+- **Defrost:** Reverse-cycle defrost energy, resistive defrost energy (active below threshold OA temp)
+- **Crankcase heater:** Parasitic energy when compressor off and OA temp below threshold
+- **Part-load degradation:** PLF curve for cycling losses
+
+**File:** `crates/ep-coils/src/water.rs` (expand)
+
+- **Detailed geometry:** Finned tube dimensions, tube rows, fin spacing → NTU from physical geometry
+- **Condensation:** When coil surface temp < dew point, switch to wet coil effectiveness
+- **Counter-flow vs. cross-flow:** Different ε-NTU formulas
+
+### Phase 8 Tests (~80 new)
+
+- Air loop: known zone load → correct supply air temperature
+- Air loop convergence: iterate 2-3 times → residual < 0.01°C
+- VAV terminal: zone above cooling setpoint → flow increases; below → minimum flow + reheat
+- Economizer: OA 15°C, return 25°C → 100% OA; OA 35°C → minimum OA
+- Setpoint manager: OA reset between 10°C→15°C supply and 30°C→12°C supply
+- Controller: bisection finds water flow for target coil outlet within 0.1°C
+- DX defrost: OA at -5°C → defrost energy > 0
+- Water coil wet: entering air at 30°C/70%RH → condensation, latent capacity > 0
+
+**Exit criteria:** Single-zone VAV system maintains zone at setpoint during a 24-hour design day. Energy consumption within 5% of EnergyPlus reference.
+
+---
+
+## 6. Phase 9: Plant Loop Integration
+
+**Goal:** Water-side equipment responds to building loads. A chilled water loop with chiller + pump + cooling coil converges correctly.
+
+**Crates modified:** ep-plant, ep-nodes
+
+### 6.1 Plant Loop Solver
+
+**File:** `crates/ep-plant/src/loop_solver.rs` (new)
+
+Implement the half-loop iteration scheme:
+
+```
+1. Demand side (coils request flow based on load):
+   For each branch on demand side:
+     component.simulate() → sets flow request and outlet temp
+   Mixer: mass-weighted average of branch outlet temps
+
+2. Supply side (equipment meets demand):
+   Pump: deliver requested flow (or design max)
+   For each branch on supply side:
+     component.simulate() → calculates capacity at given flow
+   Mixer: mass-weighted average
+
+3. Convergence check:
+   If |T_supply_out - T_supply_out_prev| > tolerance → repeat
+   If |flow_request - flow_delivered| > tolerance → repeat
+   Max 8 iterations
+```
+
+- **FlowLockState progression:** PumpQuery (determine available flow) → Unlocked (components request flow) → Locked (pump fixes flow, components adjust)
+- **Equipment operation:** Load range based sequencing (OperationScheme), multiple equipment sets
+- **Flow distribution:** Splitter distributes to branches proportionally or via load-optimal scheme
 
 ```rust
-// crates/ep-hvac/src/lib.rs
-
-pub mod fan;
-pub mod coil;
-pub mod dx;
-pub mod unitary;
-pub mod air_loop;
-pub mod terminal;
-pub mod controller;
-pub mod availability;
-pub mod heat_recovery;
-pub mod humidifier;
-pub mod mixer;
-pub mod sizing;
-
-/// Air-side node state.
-#[derive(Debug, Clone)]
-pub struct AirNode {
-    pub temp: Temperature,
-    pub humidity_ratio: HumidityRatio,
-    pub enthalpy: Enthalpy,
-    pub mass_flow_rate: MassFlowRate,
-    pub pressure: Pressure,
-    pub quality: f64,             // For two-phase
+pub struct PlantLoopSolver {
+    pub demand_side: HalfLoop,
+    pub supply_side: HalfLoop,
+    pub max_iterations: usize,
+    pub temp_tolerance: f64,
+    pub flow_tolerance: f64,
 }
 
-/// Fan component.
-pub struct Fan {
-    pub name: String,
-    pub fan_type: FanType,
-    pub max_flow_rate: VolumeFlowRate,
-    pub delta_pressure: Pressure,
-    pub total_efficiency: f64,
-    pub motor_efficiency: f64,
-    pub motor_in_air_fraction: f64,
-    // ... state variables
-}
-
-pub enum FanType {
-    ConstantVolume,
-    VariableVolume { min_flow_frac: f64, curve: CurveRef },
-    OnOff,
-    ComponentModel { /* belt, motor, VFD sub-models */ },
-}
-
-impl HvacComponent for Fan {
-    fn simulate(
-        &mut self, state: &mut SimulationState,
-        first_hvac_iteration: bool, load: Power, run: bool,
-    ) -> SimResult<()> {
-        self.init(state, first_hvac_iteration);
-        self.calc(state);
-        self.update(state);
-        Ok(())
-    }
-    // ...
-}
-
-/// DX cooling coil (single speed).
-pub struct DxCoolingCoil {
-    pub name: String,
-    pub rated_capacity: Power,
-    pub rated_cop: f64,
-    pub rated_flow_rate: VolumeFlowRate,
-    pub total_cooling_curve: CurveRef,     // f(Twb, Tdb_condenser)
-    pub eir_curve: CurveRef,               // f(Twb, Tdb_condenser)
-    pub plf_curve: CurveRef,               // f(part_load_ratio)
-    // ... many more parameters
+impl PlantLoopSolver {
+    pub fn simulate(&mut self, nodes: &mut NodeManager) -> PlantConvergenceResult;
 }
 ```
 
-**Dependencies:** `ep-units`, `ep-core`, `ep-psychrometrics`, `ep-curves`,
-`ep-schedule`, `ep-fluids`, `ep-sizing`
+*C++ reference:* `Plant/LoopSide.cc::Simulate()` + `PlantManager.cc::ManagePlantLoops()`.
 
-**Complexity estimate:**
-- Lines of Rust: ~40,000-55,000
-- Effort: **18-24 person-months**
-- Difficulty: **Very High**
+### 6.2 Enhanced Chiller Models
 
-**Migration strategy:** This must be broken into sub-phases:
-1. Fans (simplest, well-defined physics)
-2. Simple coils (hot water, electric heating)
-3. DX cooling coils (single speed, then multi-speed)
-4. Unitary systems (package the above)
-5. Air loops and controllers
-6. Terminal units
-7. VRF systems (last, most complex single module)
+**File:** `crates/ep-plant/src/chiller.rs` (expand)
 
-**Risks:**
-- DXCoils.cc alone is 18,000 lines with dozens of performance curve lookups
-- VRF systems have complex refrigerant-side models with phase-change physics
-- Controller convergence logic is subtle (hunting, overshooting)
-- Autosizing creates circular dependencies (equipment sizes depend on loads
-  which depend on equipment)
+Add additional chiller types:
 
-### 2.9 HVAC Water-Side / Plant (`ep-plant`)
+- **Reformulated EIR:** Uses leaving condenser water temp (not entering) as independent variable — more stable for condenser loop iteration
+- **Absorption:** Single-effect absorption with generator heat input, COP ~0.7
+- **Constant COP:** Simplest model for early testing and placeholder use
+- **Condenser types:** Water-cooled (plant loop), air-cooled (uses OA temp), evaporative
+- **Operating limits:** Minimum PLR, false loading, cycling logic
 
-**Scope:** EnergyPlus files: `Plant/` directory (28 files),
-`PlantChillers.cc` (7,542 lines), `Boilers.cc`, `BoilerSteam.cc`,
-`CondenserLoopTowers.cc` (6,330 lines), `Pumps.cc`,
-`PlantHeatExchangerFluidToFluid.cc`, `ChillerAbsorption.cc`,
-`ChillerElectricEIR.cc`, `ChillerReformulatedEIR.cc`,
-`HeatPumpWaterToWaterHEATING.cc`, `HeatPumpWaterToWaterCOOLING.cc`,
-`PlantCentralGSHP.cc`, `WaterToAirHeatPump*.cc`,
-`LowTempRadiantSystem.cc` (6,016 lines), `PlantPipingSystemsManager.cc` (6,111 lines).
+### 6.3 Heat Pump Models
 
-**Key algorithms:**
-- Plant loop solver: half-loop iteration with supply/demand sides,
-  splitter-mixer topology, 2-8 sub-iterations (PlantLoopSolver.cc)
-- Flow resolution: flow request aggregation from demand components,
-  supply-side component dispatching
-- Equipment operation schemes: load range, cooling/heating priority,
-  optimal sequential loading, uncontrolled, user-defined
-- Boiler model: efficiency curve f(PLR), hot water production
-- Chiller models: EIR (Energy Input Ratio), reformulated EIR,
-  absorption (single/double effect), electric, engine-driven
-- Cooling tower: YorkCalc, CoolTools, variable speed fan models
-- Pumps: constant speed, variable speed, pressure-based
-- Demand-side components: coils, radiant systems, SWH
-- Common pipe and two-way common pipe for primary-secondary loops
+**File:** `crates/ep-plant/src/heat_pump.rs` (new)
 
-**Rust crate public API sketch:**
+- **Water-to-water equation fit:** 5-coefficient equation for capacity and power as functions of source/load temps and flow
+- **Plant loop EIR HP:** Same structure as EIR chiller but for heat pump mode (reversible)
+- **Source-side coupling:** Connects to ground loop, lake, or condenser loop
+
+### 6.4 Ground Heat Exchangers
+
+**File:** `crates/ep-plant/src/ghx.rs` (new)
+
+- **Vertical borehole:** Cylindrical source model with thermal response factors (g-functions)
+  - Temporal superposition of load pulses
+  - Borehole resistance calculation from pipe geometry
+- **Slinky (horizontal):** Ring source model for horizontal spiral pipes
+- **Surface GHX:** Simple UA model for pond/lake surface heat exchange
+
+*C++ reference:* `GroundHeatExchangers/` (3,505 lines)
+
+### 6.5 Thermal Storage
+
+**File:** `crates/ep-plant/src/storage.rs` (new)
+
+- **Stratified tank:** Multi-node 1D model (10-12 nodes), buoyancy-driven mixing, heat loss per node
+- **Ice storage (simple):** Charge/discharge capacity curves, ice fraction tracking, discharge priority
+- **Chilled water storage:** Mixed (existing) and stratified modes
+
+*C++ reference:* `WaterThermalTanks.cc` (13,199 — stratified sections ~4K) + `IceThermalStorage.cc` (2,266)
+
+### 6.6 Enhanced Pumps & Pipes
+
+Expand existing pump models:
+
+- **Headered pumps:** Multiple parallel pumps (staged on/off based on flow demand)
+- **Pipe heat transfer:** UA model for heat loss from outdoor/underground pipes
+- **Adiabatic pipe:** Pass-through (no heat loss) for topology completeness
+
+### Phase 9 Tests (~70 new)
+
+- Loop solver convergence: chiller + pump + coil → stable outlet temp within 4 iterations
+- Flow distribution: 2-branch splitter with different loads → different flows
+- Equipment staging: 2 chillers, half-load → only 1 chiller runs
+- Reformulated EIR chiller: COP at off-design conditions matches published data
+- Absorption chiller: COP ~0.7, generator heat input > cooling output
+- Heat pump: COP varies with source/load temperatures as expected
+- Borehole GHX: known soil properties → fluid outlet temp within 0.5°C
+- Stratified tank: hot draw from top → cold water at bottom, thermal stratification maintained
+- Ice storage: charge → full discharge → energy balance within 1%
+- Headered pumps: increasing demand → pumps stage on one at a time
+
+**Exit criteria:** Chilled water plant loop (chiller + tower + pump + cooling coil) responds correctly to varying building loads. Plant energy consumption within 5% of EnergyPlus.
+
+---
+
+## 7. Phase 10: Simulation Driver & Sizing
+
+**Goal:** Wire everything together. An IDF file runs end-to-end through the full simulation loop and produces correct output files. BESTEST Case 600 passes.
+
+**Crates modified:** ep-sim, ep-io, ep-zone-air, ep-output, ep-core
+
+### 7.1 Simulation Loop
+
+**File:** `crates/ep-sim/src/lib.rs` (implement `SimulationDriver::run()`)
 
 ```rust
-// crates/ep-plant/src/lib.rs
+pub fn run(&mut self) -> SimulationResult {
+    self.initialize();                    // read input, setup constructions, CTFs, etc.
+    self.size();                          // run sizing if needed
 
-pub mod loop_solver;
-pub mod boiler;
-pub mod chiller;
-pub mod cooling_tower;
-pub mod pump;
-pub mod heat_exchanger;
-pub mod operation;
-pub mod pipe;
+    for env in self.environment_queue.drain(..) {
+        self.begin_environment(&env);
+        self.run_warmup(&env);            // repeat days until convergence
 
-/// A plant loop with supply and demand sides.
-pub struct PlantLoop {
-    pub name: String,
-    pub loop_type: PlantLoopType,
-    pub fluid: FluidType,
-    pub sides: [LoopSide; 2],       // [Supply, Demand]
-    pub operation_scheme: OperationScheme,
-    pub max_flow_rate: MassFlowRate,
-    pub min_flow_rate: MassFlowRate,
-    pub setpoint_temp: Temperature,
-    pub common_pipe: CommonPipeType,
-}
+        for day in env.days() {
+            self.begin_day(day);
+            for hour in 0..24 {
+                self.begin_hour(hour);
+                self.update_weather(hour);
+                self.update_solar_position(hour);
 
-pub struct LoopSide {
-    pub branches: Vec<Branch>,
-    pub splitter: Option<Splitter>,
-    pub mixer: Option<Mixer>,
-    pub inlet_node: NodeIndex,
-    pub outlet_node: NodeIndex,
-    pub needs_simulation: bool,
-}
+                for timestep in 0..self.timesteps_per_hour {
+                    self.begin_timestep(timestep);
+                    self.calc_heat_balance();        // surfaces, solar, internal gains
+                    self.predict_zone_temps();        // predictor step
 
-pub struct Branch {
-    pub name: String,
-    pub components: Vec<Box<dyn PlantComponent>>,
-    pub flow_rate: MassFlowRate,
-    pub pressure_drop: Pressure,
-}
+                    for hvac_iter in 0..self.max_hvac_iterations {
+                        self.simulate_zone_equipment();
+                        self.simulate_air_loops();
+                        self.simulate_plant_loops();
+                        if self.hvac_converged() { break; }
+                    }
 
-/// Plant loop solver.
-pub struct PlantManager {
-    loops: Vec<PlantLoop>,
-    calling_order: Vec<HalfLoopId>,
-    min_iterations: u32,            // default 2 (7 with common pipe)
-    max_iterations: u32,            // default 8
-}
-
-impl PlantManager {
-    pub fn simulate(
-        &mut self,
-        state: &mut SimulationState,
-        sim_air: &mut bool,
-        sim_zone_equip: &mut bool,
-        sim_plant: &mut bool,
-    ) -> SimResult<()> {
-        let mut iteration = 0;
-        loop {
-            for half_loop_id in &self.calling_order {
-                let (loop_idx, side) = half_loop_id.unpack();
-                let plant_loop = &mut self.loops[loop_idx];
-                plant_loop.sides[side as usize].solve(state)?;
+                    self.correct_zone_temps();        // corrector step
+                    self.update_output_variables();
+                    self.end_timestep();
+                }
+                self.end_hour();
             }
-
-            iteration += 1;
-            if iteration >= self.min_iterations && self.check_convergence() {
-                break;
-            }
-            if iteration >= self.max_iterations {
-                break;
-            }
+            self.end_day();
         }
-        *sim_plant = false;
-        Ok(())
+        self.end_environment();
     }
-}
-
-/// Hot water boiler model.
-pub struct Boiler {
-    pub name: String,
-    pub nominal_capacity: Power,
-    pub nominal_efficiency: f64,
-    pub efficiency_curve: CurveRef,   // f(PLR)
-    pub design_water_flow_rate: MassFlowRate,
-    pub min_plr: f64,
-    pub max_plr: f64,
-    pub optimum_plr: f64,
-    // Operating state
-    fuel_used: Power,
-    heating_output: Power,
-    water_outlet_temp: Temperature,
-}
-
-impl PlantComponent for Boiler {
-    fn simulate(
-        &mut self, state: &mut SimulationState,
-        first_hvac_iteration: bool, load: Power, run: bool,
-    ) -> SimResult<()> {
-        if !run || load <= Power::ZERO {
-            self.fuel_used = Power::ZERO;
-            self.heating_output = Power::ZERO;
-            return Ok(());
-        }
-
-        let plr = (load / self.nominal_capacity).clamp(self.min_plr, self.max_plr);
-        let efficiency = self.nominal_efficiency
-            * state.curves.evaluate(self.efficiency_curve, plr);
-
-        self.heating_output = self.nominal_capacity * plr;
-        self.fuel_used = self.heating_output / efficiency;
-
-        // Calculate outlet water temperature
-        let cp = state.fluids.specific_heat(self.fluid, self.inlet_temp());
-        let mdot = self.water_mass_flow_rate();
-        if mdot > MassFlowRate::ZERO {
-            let delta_t = TempDelta::new(self.heating_output.value() / (mdot.value() * cp.value()));
-            self.water_outlet_temp = self.inlet_temp() + delta_t;
-        }
-
-        Ok(())
-    }
-    // ...
+    self.finalize()
 }
 ```
 
-**Dependencies:** `ep-units`, `ep-core`, `ep-fluids`, `ep-curves`, `ep-schedule`
-
-**Complexity estimate:**
-- Lines of Rust: ~25,000-35,000
-- Effort: **12-16 person-months**
-- Difficulty: **Very High**
-
-**Migration strategy:**
-1. Plant loop topology and flow resolution (the framework)
-2. Pumps (simple, well-defined)
-3. Boilers (canonical equipment pattern)
-4. Electric EIR chiller (most common chiller model)
-5. Cooling towers
-6. Remaining equipment
-
-**Risks:**
-- Plant loop convergence is the most difficult numerical problem in EnergyPlus
-- Common pipe and two-way common pipe logic is notoriously fragile
-- Equipment operation scheme dispatching has complex priority logic
-- Chiller models involve thermodynamic property lookups that must match E+ exactly
-
-### 2.10 Airflow Network (`ep-airflow`)
-
-**Scope:** EnergyPlus files: `AirflowNetwork/` directory (6 files totaling ~130K+ lines),
-`AirflowNetworkBalanceManager.cc`.
-
-The AirflowNetwork module is the single largest subsystem by line count in its
-directory files (Elements.hpp alone is ~87,000 lines), though much of this is
-data tables and repetitive component definitions.
-
-**Key algorithms:**
-- Multi-zone pressure network: nodal pressure/mass-flow equations
-- Newton-Raphson iterative solver for nonlinear flow equations
-- Component models: cracks (power law), effective leakage areas, doors, windows,
-  horizontal openings, duct segments, duct leakage, constant-volume fans
-- Wind pressure coefficients on building surfaces
-- Stack effect (buoyancy-driven flow)
-- Duct heat gain/loss during air transport
-
-**Rust crate public API sketch:**
-
-```rust
-// crates/ep-airflow/src/lib.rs
-
-pub mod network;
-pub mod elements;
-pub mod solver;
-
-/// Airflow network node (zone or external).
-pub struct AirflowNode {
-    pub name: String,
-    pub node_type: AirflowNodeType,
-    pub pressure: Pressure,
-    pub temperature: Temperature,
-    pub humidity_ratio: HumidityRatio,
-    pub height: Length,
-}
-
-pub enum AirflowNodeType {
-    Zone(usize),          // Zone index
-    External,             // Outdoor node
-    Other,                // Internal duct node
-}
-
-/// Airflow element (connection between nodes).
-pub trait AirflowElement: Send + Sync {
-    /// Calculate mass flow rate given pressure difference.
-    fn flow_at_pressure(
-        &self, dp: Pressure, density: Density, viscosity: DynamicViscosity,
-    ) -> (MassFlowRate, f64);   // (flow, dF/dP for Jacobian)
-}
-
-/// Power-law crack model: m_dot = C * (dP)^n
-pub struct CrackElement {
-    pub coefficient: f64,
-    pub exponent: f64,       // typically 0.65
-    pub reference_conditions: AirProperties,
-}
-
-pub struct AirflowNetworkSolver {
-    nodes: Vec<AirflowNode>,
-    links: Vec<AirflowLink>,
-    jacobian: ndarray::Array2<f64>,
-    max_iterations: u32,
-    convergence_tolerance: f64,
-}
-
-impl AirflowNetworkSolver {
-    pub fn solve(&mut self, state: &SimulationState) -> SimResult<()>;
-}
-```
-
-**Dependencies:** `ep-units`, `ep-core`, `ep-psychrometrics`
-
-**Complexity estimate:**
-- Lines of Rust: ~8,000-12,000
-- Effort: 5-7 person-months
-- Difficulty: High
-
-**Migration strategy:** The airflow network is relatively self-contained. Validate
-by comparing zone infiltration/ventilation rates and pressure distributions
-against EnergyPlus.
-
-**Risks:**
-- Newton-Raphson convergence is sensitive to initial guesses and step sizing
-- The Jacobian matrix can become singular for poorly-connected networks
-- Wind pressure coefficient data tables are large and building-shape-dependent
-
-### 2.11 Refrigeration Systems (`ep-refrigeration`)
-
-**Scope:** EnergyPlus files: `RefrigeratedCase.cc` (16,340 lines).
-
-**Key algorithms:**
-- Display case heat balance: anti-sweat heaters, fan power, lighting, defrost
-- Compressor rack: single/two-stage, variable-speed compressor curves
-- Walk-in cooler/freezer: door openings, defrost, floor heaters
-- Secondary loops: brine systems, cascade condensers
-- Condenser: air-cooled, evaporative, water-cooled
-- Subcooler, liquid suction heat exchanger
-- Transcritical CO2 system models
-
-**Complexity estimate:**
-- Lines of Rust: ~8,000-10,000
-- Effort: 4-6 person-months
-- Difficulty: High
-
-**Migration strategy:** Mostly independent from the main HVAC/plant loop.
-Validate against dedicated refrigeration test cases.
-
-**Risks:**
-- `RefrigeratedCase.cc` is a single 16K-line monolith that conflates many
-  different system types. Decomposition into clean Rust modules requires
-  careful understanding of the internal state machine.
-- Transcritical CO2 systems have unique thermodynamic property requirements
-
-### 2.12 Water Systems (`ep-water`)
-
-**Scope:** EnergyPlus files: `WaterThermalTanks.cc` (13,199 lines),
-`WaterUse.cc`, `WaterManager.cc`, `SolarCollectors.cc`,
-`PlantSolarCollectors.cc`, `IceThermalStorage.cc`.
-
-**Key algorithms:**
-- Stratified water tank model: 1D multi-node thermal model with
-  mixing, heat loss, auxiliary heating, and use-side draw
-- Mixed tank model: single-node with deadband control
-- Heat pump water heater: wrapped DX coil with stratified tank
-- Solar thermal collectors: flat plate (Hottel-Whillier), ICS (integrated collector storage),
-  evacuated tube models
-- Ice thermal storage: simple, detailed, and tabular models
-- Water use connections, fixtures, and drain water heat recovery
-
-**Complexity estimate:**
-- Lines of Rust: ~8,000-10,000
-- Effort: 4-6 person-months
-- Difficulty: High
-
-**Migration strategy:** Water heater models are self-contained with plant loop
-interface. Validate stratified tank temperature profiles against EnergyPlus.
-
-**Risks:**
-- Stratified tank mixing algorithms are numerically sensitive
-- Heat pump water heater wraps both a DX coil and a tank, creating a
-  nested simulation loop
-- Solar collector models have complex thermal-optical interactions
-
-### 2.13 On-Site Generation (`ep-generation`)
-
-**Scope:** EnergyPlus files: `Photovoltaics.cc`, `WindTurbine.cc`,
-`FuelCellElectricGenerator.cc`, `MicroCHPElectricGenerator.cc`,
-`ICEngineElectricGenerator.cc`, `MicroturbineElectricGenerator.cc`,
-`ElectricPowerServiceManager.cc`, `GeneratorFuelSupply.cc`,
-`GeneratorDynamicsManager.cc`.
-
-**Key algorithms:**
-- PV models: simple, Sandia, TRNSYS equivalent one-diode (I-V curve,
-  Newton-Raphson for operating point)
-- Wind turbine: power curve lookup, rotor height wind profile,
-  Betz limit considerations
-- Fuel cell: electrochemical model, thermal output
-- Micro-CHP: thermal-following/electrical-following control
-- IC engine/combustion turbine: efficiency curves, heat recovery
-- Inverters: CEC lookup table, curve-based, constant efficiency
-- Battery storage: simple charge/discharge model, kinetic battery model
-- Load center distribution: AC/DC buses, baseload/demand-following dispatch
-
-**Complexity estimate:**
-- Lines of Rust: ~6,000-8,000
-- Effort: 3-5 person-months
-- Difficulty: Medium-High
-
-**Migration strategy:** Each generator type is mostly independent. Validate
-electrical output against EnergyPlus for standard test cases. The
-ElectricPowerServiceManager (dispatch logic) should be ported last.
-
-**Risks:**
-- One-diode PV model requires Newton-Raphson convergence on the I-V curve
-- Integration with SSC/SAM library may require FFI during transition
-- Battery state-of-charge tracking requires careful timestep handling
-
-### 2.14 Demand-Side Management / EMS (`ep-ems`, `ep-demand`)
-
-**Scope:** EnergyPlus files: `EMSManager.cc`, `RuntimeLanguageProcessor.cc`,
-`DataRuntimeLanguage.hh`, `DemandManager.cc`, `PluginManager.cc`.
-
-**Key algorithms:**
-- Erl scripting language: tokenizer, parser, stack-based evaluator with 64+
-  built-in functions
-- 21 calling points distributed throughout the simulation loop
-- Actuator/sensor registration and lookup
-- Demand manager: rolling-window demand calculation, sequential/optimal/all
-  priority shedding
-- Plugin manager: Python plugin execution via embedded interpreter
-
-**Rust crate public API sketch:**
-
-```rust
-// crates/ep-ems/src/lib.rs
-
-pub mod actuator;
-pub mod sensor;
-pub mod scripting;
-
-/// EMS actuator that can override a simulation variable.
-pub struct Actuator {
-    pub component_type: String,
-    pub unique_id: String,
-    pub control_type: String,
-    pub is_active: bool,
-    pub value: f64,
-    target: ActuatorTarget,     // Internal pointer to the controlled variable
-}
-
-/// EMS sensor that reads a simulation variable.
-pub struct Sensor {
-    pub variable_name: String,
-    pub key: String,
-    source: SensorSource,       // Internal pointer to the source variable
-}
-
-/// Embedded scripting engine (replaces Erl).
-/// Uses Rhai for a safe, sandboxed scripting language.
-pub struct ScriptEngine {
-    engine: rhai::Engine,
-    programs: Vec<CompiledProgram>,
-    actuators: Vec<Actuator>,
-    sensors: Vec<Sensor>,
-}
-
-/// Compiled EMS program bound to a calling point.
-pub struct CompiledProgram {
-    pub name: String,
-    pub calling_point: CallingPoint,
-    pub ast: rhai::AST,
-}
-```
-
-**Dependencies:** `ep-units`, `ep-core`, `rhai` (scripting), `ep-schedule`
-
-**Complexity estimate:**
-- Lines of Rust: ~5,000-7,000
-- Effort: 4-5 person-months
-- Difficulty: High
-
-**Migration strategy:** The EMS is deeply integrated with the simulation loop.
-Port the actuator/sensor registry first, then the scripting engine. Consider
-replacing Erl with Rhai (a Rust-native scripting language) or embedded Python
-via PyO3.
-
-**Risks:**
-- EMS actuators can override almost any variable in the simulation, creating
-  arbitrary coupling between subsystems
-- Erl has quirky syntax that differs from standard scripting languages;
-  backward compatibility requires either an Erl parser or a migration tool
-- 21 calling points mean the EMS hooks into many places in the simulation loop
-
-### 2.15 Output & Reporting (`ep-output`)
-
-**Scope:** EnergyPlus files: `OutputProcessor.cc`, `OutputReportTabular.cc` (19,749 lines),
-`OutputReportTabularAnnual.cc`, `OutputReportPredefined.cc`, `OutputReports.cc`,
-`ResultsFramework.cc`, `SQLiteProcedures.cc`.
-
-**Key algorithms:**
-- Variable registration with pointer-to-source pattern
-- Time-step aggregation: sum/average over timestep, hourly, daily, monthly, annual
-- 49 end-use categories with meter hierarchy
-- Tabular reports: zone component loads, envelope, HVAC sizing, economics
-- SQL output: full schema with simulation metadata, variable dictionaries, time series
-- ESO/MTR file format: legacy comma-delimited output
-
-**Rust crate public API sketch:**
-
-```rust
-// crates/ep-output/src/lib.rs
-
-pub mod variable;
-pub mod meter;
-pub mod tabular;
-pub mod sql;
-pub mod csv;
-
-/// Output variable registered by a component.
-pub struct OutputVariable {
-    pub name: String,
-    pub key: String,
-    pub units: String,
-    pub frequency: ReportFreq,
-    pub store_type: StoreType,
-    value: f64,
-    accumulated: f64,
-    min_value: f64,
-    max_value: f64,
-    count: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum ReportFreq {
-    EachCall,
-    TimeStep,
-    Hourly,
-    Daily,
-    Monthly,
-    RunPeriod,
-    Annual,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum StoreType {
-    Average,
-    Sum,
-}
-
-pub struct OutputManager {
-    variables: Vec<OutputVariable>,
-    meters: Vec<Meter>,
-    sql_writer: Option<SqlWriter>,
-    csv_writer: Option<CsvWriter>,
-}
-```
-
-**Dependencies:** `ep-core`, `rusqlite`, `csv`
-
-**Complexity estimate:**
-- Lines of Rust: ~8,000-12,000
-- Effort: 4-6 person-months
-- Difficulty: Medium-High
-
-**Migration strategy:** Output is mostly independent of physics. Start with
-CSV output, then SQL, then tabular reports. Validate by comparing output
-files line-by-line.
-
-**Risks:**
-- `OutputReportTabular.cc` at 19,749 lines is the largest file in the codebase,
-  generating dozens of standardized report tables with complex formatting
-- Variable registration uses raw pointers in C++; the Rust version needs a
-  safe alternative (indices into a variable store, or interior mutability patterns)
-
-### 2.16 Input Processing (`ep-io`)
-
-**Scope:** EnergyPlus files: `InputProcessing/` directory (InputProcessor, IdfParser,
-InputValidation, CsvParser, DataStorage), `idd/` directory (schema),
-`Energy+.schema.epJSON`.
-
-**Key algorithms:**
-- IDF tokenizer and parser (free-format, comma-delimited with `!` comments)
-- IDF-to-JSON conversion using the IDD (Input Data Dictionary) schema
-- JSON Schema validation
-- Case-insensitive object/field lookup with caching
-- Object factory pattern for typed object creation
-
-**Rust crate public API sketch:**
-
-```rust
-// crates/ep-io/src/lib.rs
-
-pub mod idf;
-pub mod schema;
-pub mod validation;
-pub mod new_format;   // Future: TOML or custom DSL
-
-/// Parsed input model.
-pub struct InputModel {
-    objects: HashMap<String, Vec<serde_json::Value>>,
-    schema: InputSchema,
-}
-
-impl InputModel {
-    /// Parse an IDF file.
-    pub fn from_idf(path: &Path) -> SimResult<Self>;
-
-    /// Parse a JSON input file.
-    pub fn from_json(path: &Path) -> SimResult<Self>;
-
-    /// Get all objects of a given type.
-    pub fn get_objects(&self, object_type: &str) -> &[serde_json::Value];
-
-    /// Validate against schema.
-    pub fn validate(&self) -> Vec<ValidationError>;
-}
-
-/// Schema definition for input validation.
-pub struct InputSchema {
-    object_defs: HashMap<String, ObjectDefinition>,
-}
-```
-
-**Dependencies:** `ep-core`, `serde`, `serde_json`
-
-**Complexity estimate:**
-- Lines of Rust: ~4,000-6,000
-- Effort: 3-4 person-months
-- Difficulty: Medium
-
-**Migration strategy:** Start with epJSON (already JSON), then add IDF parser.
-Consider defining a new input format alongside IDF compatibility.
-
-**Risks:**
-- IDF format has 30+ years of accumulated quirks
-- ~900 object types with complex inter-object reference validation
-- Backward compatibility is critical for ecosystem adoption
-
-### 2.17 Co-Simulation / FMI (`ep-fmi`)
-
-**Scope:** EnergyPlus files: `ExternalInterface.cc`, FMI third-party library,
-BCVTB interface.
-
-**Key algorithms:**
-- FMI 2.0 co-simulation slave implementation
-- Variable exchange at zone timestep boundaries
-- Input mapping: schedule overrides, variable values, actuator values
-- Synchronization with master simulator
-
-**Complexity estimate:**
-- Lines of Rust: ~2,000-3,000
-- Effort: 2-3 person-months
-- Difficulty: Medium
-
-**Risks:**
-- FMI specification compliance requires careful state management
-- Must handle asynchronous timing with external simulators
-
-### 2.18 Ground Heat Transfer (`ep-ground`)
-
-**Scope:** EnergyPlus files: `HeatBalanceKivaManager.cc/hh`,
-`GroundTemperatureModeling/` directory (5 model files),
-`PlantPipingSystemsManager.cc` (6,111 lines),
-plus legacy Fortran: `src/Basement/` and `src/Slab/` directories.
-
-**Key algorithms:**
-- Kiva: 2D finite-difference ground domain with foundation coupling
-  (using the kiva third-party library)
-- Site ground temperatures: shallow (Kusuda-Achenbach, Xing) and deep models
-- Plant piping systems: buried pipe heat transfer
-- Slab-on-grade: 3D heat transfer (legacy Fortran, replaced by Kiva)
-- Basement: 3D basement heat transfer (legacy Fortran, replaced by Kiva)
-
-**Complexity estimate:**
-- Lines of Rust: ~4,000-6,000
-- Effort: 3-4 person-months
-- Difficulty: High
-
-**Migration strategy:** Use FFI to call the existing Kiva C++ library initially.
-Re-implement the simpler ground temperature models in pure Rust.
-
-**Risks:**
-- Kiva is a substantial C++ library; full Rust rewrite would be a project in itself
-- Ground heat transfer has very long time constants requiring multi-year warmup
-
-### 2.19 Simulation Manager / Orchestrator (`ep-sim`)
-
-**Scope:** EnergyPlus files: `SimulationManager.cc`, `DataGlobals.hh`,
-`HeatBalanceManager.cc` (6,131 lines), `NodeInputManager.cc`,
-`BranchInputManager.cc`, `BranchNodeConnections.cc`,
-sizing-related files in `Autosizing/` directory (44 files).
-
-**Key algorithms:**
-- Simulation loop orchestration (Environment -> Day -> Hour -> TimeStep)
-- Warmup convergence detection
-- Sizing passes: zone sizing, system sizing, plant sizing
-- Design day simulation for sizing
-- Node and branch connection validation
-- Simulation cost estimation and lifecycle cost analysis
-
-**Complexity estimate:**
-- Lines of Rust: ~6,000-8,000
-- Effort: 4-5 person-months
-- Difficulty: High
-
-**Migration strategy:** The orchestrator is the last piece to come together,
-as it depends on all other subsystems. Build incrementally as subsystems
-become available.
-
-**Risks:**
-- Warmup convergence criteria must exactly match EnergyPlus behavior
-- Sizing passes involve iterative re-simulation with different conditions
-- The orchestrator mediates all inter-subsystem coupling
+*C++ reference:* `SimulationManager.cc` — `ManageSimulation()`, nested loop with flag management.
+
+### 7.2 Zone Predictor-Corrector
+
+**File:** `crates/ep-zone-air/src/` (expand)
+
+Complete the full predictor-corrector integration:
+
+- **Predictor:** Using previous timestep's zone temp and estimated loads, predict new zone temp
+- **HVAC simulation:** Run air loops and plant at predicted zone conditions
+- **Corrector:** With actual HVAC output, solve for final zone temp using one of three methods:
+  - Third-order backward difference (most accurate, needs 3 history values)
+  - Euler forward (simplest, first timestep)
+  - Analytical (exact exponential solution for constant coefficients)
+- **History management:** Push/pop temperature history arrays for dual-timestep switching
+- **Moisture parallel:** Same predictor-corrector structure for humidity ratio
+
+### 7.3 IDF Schema Expansion
+
+**File:** `crates/ep-io/src/schema.rs` (expand from ~15 to ~65 object definitions)
+
+Add the ~50 most common IDF objects needed to run standard files:
+
+**Building & Site:**
+- `Building`, `GlobalGeometryRules`, `Site:Location`, `Site:GroundTemperature:BuildingSurface`
+
+**Geometry:**
+- `Zone`, `BuildingSurface:Detailed`, `FenestrationSurface:Detailed`
+- `Shading:Site:Detailed`, `Shading:Building:Detailed`, `Shading:Zone:Detailed`
+
+**Materials & Constructions:**
+- `Material`, `Material:NoMass`, `Material:AirGap`
+- `WindowMaterial:Glazing`, `WindowMaterial:Gas`, `WindowMaterial:SimpleGlazingSystem`
+- `Construction`
+
+**Schedules:**
+- `ScheduleTypeLimits`, `Schedule:Compact`, `Schedule:Constant`
+
+**Internal Gains:**
+- `People`, `Lights`, `ElectricEquipment`, `OtherEquipment`
+- `ZoneInfiltration:DesignFlowRate`, `ZoneVentilation:DesignFlowRate`
+
+**Sizing:**
+- `Sizing:Zone`, `Sizing:System`, `Sizing:Plant`, `DesignSpecification:OutdoorAir`
+
+**HVAC:**
+- `AirLoopHVAC`, `AirLoopHVAC:ControllerList`, `AirLoopHVAC:OutdoorAirSystem`
+- `Fan:ConstantVolume`, `Fan:VariableVolume`, `Fan:OnOff`
+- `Coil:Cooling:DX:SingleSpeed`, `Coil:Heating:Fuel`, `Coil:Cooling:Water`, `Coil:Heating:Water`
+- `AirTerminal:SingleDuct:VAV:Reheat`, `AirTerminal:SingleDuct:ConstantVolume:NoReheat`
+
+**Plant:**
+- `PlantLoop`, `CondenserLoop`
+- `Boiler:HotWater`, `Chiller:Electric:EIR`, `CoolingTower:SingleSpeed`
+- `Pump:VariableSpeed`, `Pump:ConstantSpeed`, `Pipe:Adiabatic`
+
+**Setpoint Managers:**
+- `SetpointManager:Scheduled`, `SetpointManager:OutdoorAirReset`, `SetpointManager:MixedAir`
+
+**Output:**
+- `Output:Variable`, `Output:Meter`, `OutputControl:Table:Style`
+
+**Simulation Control:**
+- `SimulationControl`, `Timestep`, `RunPeriod`, `SizingPeriod:DesignDay`
+
+### 7.4 Output Integration
+
+**File:** `crates/ep-output/src/` (expand)
+
+- Wire `OutputManager` into the simulation loop: register variables during init, accumulate each timestep, report at hour/day/month/run-period boundaries
+- Complete ESO writer: header format, data dictionary, timestep data lines
+- Complete MTR writer: meter values at requested frequency
+- SQL writer: time series table, tabular data table
+- Key predefined reports: Zone Component Load Summary, HVAC Sizing Summary
+
+### 7.5 Sizing
+
+**File:** `crates/ep-sim/src/sizing.rs` (expand from stubs)
+
+- **Zone sizing:** Run design day simulation → track peak heating/cooling loads → compute design air flow rates
+- **System sizing:** Aggregate zone loads → AHU capacity, total air flow, OA flow
+- **Plant sizing:** Aggregate coil loads → chiller/boiler capacity, water flow rates
+- **Autosize resolution:** Replace `autosize` sentinel values in equipment with computed sizes
+
+### Phase 10 Tests (~50 new)
+
+- Full loop: 1-day design day, no HVAC, simple zone → hourly zone temps match reference
+- Warmup: standard construction → converges within 25 days
+- Predictor-corrector: known system output → zone temp within 0.01°C of analytical solution
+- IDF parsing: BESTEST Case 600 IDF → all objects parsed without error
+- Output: ESO file contains correct zone temperature at each timestep
+- Sizing: zone sizing for cooling design day → peak load within 5% of reference
+- End-to-end: BESTEST Case 600 → annual heating/cooling within ASHRAE 140 acceptance range
+
+**Exit criteria:** BESTEST Case 600 runs end-to-end from IDF → ESO/MTR/SQL with correct results. Annual heating and cooling loads fall within ASHRAE Standard 140 acceptance ranges.
 
 ---
 
-## 3. Phased Roadmap
+## 8. Phase 11: Equipment Breadth
 
-### Phase 0 -- Foundation (Months 1-3)
+**Goal:** Support the 20 most common example file configurations. Target: 80% of real-world IDF files use only implemented equipment types.
 
-**Objective:** Establish the core infrastructure, build system, and foundational
-crates that all subsequent phases depend on.
+### 11.1 Unitary Systems & Furnaces
 
-**Deliverables:**
-- `ep-units`: Complete physical units type system with all quantities
-- `ep-core`: Error handling, state structures, component traits, node abstractions
-- `ep-psychrometrics`: All psychrometric functions (humidity calculations)
-- `ep-fluids`: Water, glycol, steam, refrigerant property lookups
-- `ep-curves`: Performance curve evaluation (biquadratic, cubic, table lookup, etc.)
-- `ep-weather`: EPW parser, solar position, sky models, design day generation
-- `ep-schedule`: Complete schedule system with all schedule types
-- `ep-io`: IDF parser (read-only), epJSON parser, schema validation framework
-- Cargo workspace with CI/CD pipeline
-- Regression test infrastructure (`ep-diff` tool)
+Add to `ep-hvac`:
+- `AirLoopHVAC:UnitarySystem` — central dispatch for packaged equipment
+- Heat pump air-to-air (DX heating + DX cooling + electric supplemental)
+- Furnace (gas burner + DX cooling)
+- `ZoneHVAC:PackagedTerminalAirConditioner` (PTAC)
+- `ZoneHVAC:PackagedTerminalHeatPump` (PTHP)
 
-**Entry criteria:** Project kickoff, team assembled, development environment set up.
+*C++ reference:* `UnitarySystem.cc` (18K) + `Furnaces.cc` (11K) — core logic ~8K lines
 
-**Exit criteria:**
-- All foundation crates compile and pass unit tests
-- EPW files parse correctly and produce identical weather data to EnergyPlus
-- Solar position matches EnergyPlus to within 0.01 degrees
-- Schedules evaluate identically to EnergyPlus at every timestep
-- Psychrometric functions match EnergyPlus to within machine epsilon
-- CI pipeline runs on every commit
+### 11.2 Zone Equipment Expansion
 
-**Validation targets:**
-- Compare parsed EPW data against EnergyPlus weather output reports
-- Compare psychrometric function outputs against ASHRAE reference tables
-- Compare schedule values against EnergyPlus schedule output
+Add to `ep-hvac`:
+- `ZoneHVAC:FourPipeFanCoil` — cycling/multi-speed fan with water coils
+- `ZoneHVAC:Baseboard:Convective:Water` and `:Electric`
+- `ZoneHVAC:Baseboard:RadiantConvective:Water`
+- `ZoneHVAC:UnitHeater`, `ZoneHVAC:UnitVentilator`
+- `ZoneHVAC:WindowAirConditioner`
+- `ZoneHVAC:LowTemperatureRadiant:Electric` and `:Hydronic`
 
-**Team:** 2-3 engineers (1 senior Rust, 1 building physics, 1 infrastructure)
+### 11.3 VRF Systems
 
-**Key risks:**
-- Floating-point differences between C++ and Rust standard library implementations
-  may cause test failures; need to establish tolerance conventions early
-- EPW format edge cases in real-world weather files
+Add new module to `ep-hvac`:
+- `AirConditioner:VariableRefrigerantFlow` — outdoor unit with capacity modulation curves
+- `ZoneHVAC:TerminalUnit:VariableRefrigerantFlow` — indoor fan-coil units
+- Heat recovery mode (simultaneous heating + cooling)
+- Piping correction factors for refrigerant line length
 
-### Phase 1 -- Envelope (Months 4-8)
+*C++ reference:* `HVACVariableRefrigerantFlow.cc` (15.5K lines)
 
-**Objective:** Implement the building envelope heat balance, which forms the
-physical foundation for all subsequent energy calculations.
+### 11.4 Air-to-Air Heat Recovery
 
-**Deliverables:**
-- `ep-materials`: Material and construction definitions
-- `ep-surfaces`: Surface geometry, vertex processing, view factors
-- `ep-solar`: Solar/shading calculations, sunlit fractions
-- `ep-envelope`: Complete surface heat balance (CTF + CondFD)
-  - Outside surface heat balance
-  - Inside surface heat balance
-  - Interior radiant exchange (enclosure method)
-  - Convection coefficient models (minimum: TARP interior, DOE-2 exterior)
-- `ep-windows`: Basic window model (single/double pane, no complex fenestration)
-- `ep-ground`: Kusuda-Achenbach ground temperature model
+Add to `ep-hvac`:
+- `HeatExchanger:AirToAir:SensibleAndLatent` — effectiveness model (sensible + latent)
+- `HeatExchanger:AirToAir:FlatPlate` — NTU method
+- Frost control (supply bypass, exhaust recirculation)
+- Economizer bypass interaction
 
-**Entry criteria:** Phase 0 complete and passing.
+### 11.5 Expanded Plant Equipment
 
-**Exit criteria:**
-- Single-zone models with opaque surfaces produce zone loads within 1% of EnergyPlus
-- CTF coefficients match EnergyPlus output for standard constructions
-- Solar shading calculations match E+ for simple building geometries
-- Simple window models match E+ solar heat gain and U-value calculations
+Add to `ep-plant`:
+- Steam boiler
+- `DistrictCooling`, `DistrictHeating:Water` (simplified source/sink)
+- `HeatExchanger:FluidToFluid` (two-loop coupling)
+- Evaporative coolers (direct CelDekPad, indirect WetCoil)
+- `CoolingTower:TwoSpeed`, `CoolingTower:VariableSpeed:Merkel`
+- `FluidCooler:SingleSpeed`, `FluidCooler:TwoSpeed`
 
-**Validation targets:**
-- ASHRAE Standard 140 cases 600-650 (opaque envelope, basic windows)
-- EnergyPlus example files: `1ZoneUncontrolled.idf`, `5ZoneAirCooled.idf` (envelope only)
+### 11.6 Multi-Speed & Two-Stage DX
 
-**Team:** 3-4 engineers (2 building physics, 1 numerical methods, 1 geometry)
+Expand `ep-coils`:
+- `Coil:Cooling:DX:TwoSpeed` — high/low speed interpolation
+- `Coil:Cooling:DX:MultiSpeed` — speed-level interpolation with cycling between speeds
+- `Coil:Heating:DX:MultiSpeed`
+- `Coil:Cooling:DX:TwoStageWithHumidityControlMode`
+- `Coil:Cooling:DX:CurveFit:Performance` (new-generation model)
 
-**Key risks:**
-- CTF state-space eigenvalue computation is numerically fragile
-- View factor calculation for complex geometries requires robust polygon algorithms
-- Interior radiant exchange convergence for highly-coupled enclosures
+### 11.7 Additional Air Terminals
 
-### Phase 2 -- Zone (Months 9-12)
+Add to `ep-hvac`:
+- `AirTerminal:DualDuct:ConstantVolume`, `:VAV`
+- `AirTerminal:SingleDuct:SeriesPIU:Reheat` (powered induction)
+- `AirTerminal:SingleDuct:VAV:Reheat:VariableSpeedFan`
 
-**Objective:** Add zone air heat balance, basic HVAC (ideal loads), airflow,
-and daylighting to enable complete zone-level energy calculations.
+### Phase 11 Tests (~120 new)
 
-**Deliverables:**
-- `ep-zone`: Zone air predictor-corrector, moisture balance, mixing/ventilation
-- `ep-airflow`: Airflow network solver (simplified: infiltration + ventilation)
-- `ep-daylighting`: Split-flux daylighting model, daylight controls
-- Ideal loads air system (for testing zone balance without full HVAC)
-- `ep-output`: Basic output variable system (CSV + SQL)
-
-**Entry criteria:** Phase 1 complete and passing envelope validation.
-
-**Exit criteria:**
-- Multi-zone models with ideal loads match E+ zone temperatures within 0.1 degC
-- Zone loads match within 1% for annual simulations
-- Airflow network produces matching infiltration rates
-- Daylighting reduces electric lighting loads correctly
-
-**Validation targets:**
-- ASHRAE Standard 140 cases 600-960 (complete BESTEST suite, opaque + windows)
-- EnergyPlus example files with ideal loads
-- Multi-zone models with zone mixing
-
-**Team:** 3-4 engineers (2 building physics, 1 HVAC, 1 daylighting)
-
-**Key risks:**
-- Predictor-corrector feedback loop must converge stably
-- Third-order backward difference initialization during warmup transitions
-
-### Phase 3 -- HVAC (Months 13-20)
-
-**Objective:** Implement the full HVAC simulation capability: air-side systems,
-plant loops, and all major equipment types.
-
-This is the longest and most complex phase, subdivided into sub-phases:
-
-**Phase 3a -- HVAC Core (Months 13-15):**
-- Fans (all types), simple heating/cooling coils (electric, hot water, chilled water)
-- Air loops with OA mixer, supply fan, and coils
-- Single-duct VAV terminals
-- Setpoint managers and controllers
-- Basic plant loop solver with pumps and boilers
-
-**Phase 3b -- DX and Unitary (Months 16-18):**
-- DX cooling coils (single-speed, multi-speed, variable speed)
-- Unitary systems (furnaces, DX heat pumps)
-- Heat recovery (air-to-air)
-- Humidifiers
-- EIR chillers and cooling towers
-- Ice thermal storage
-
-**Phase 3c -- Advanced HVAC (Months 19-20):**
-- VRF systems
-- Absorption chillers
-- Low-temperature radiant systems
-- Dedicated outdoor air systems (DOAS)
-- Remaining terminal unit types
-- Complete autosizing
-
-**Entry criteria:** Phase 2 complete and passing zone validation.
-
-**Exit criteria:**
-- Standard HVAC configurations (VAV, CAV, DOAS, VRF) produce annual energy
-  within 2% of EnergyPlus
-- Plant loops converge reliably for all standard configurations
-- Autosizing produces equipment capacities within 5% of EnergyPlus
-
-**Validation targets:**
-- EnergyPlus example files: `5ZoneAirCooled.idf`, `DOASDualDuctSchool.idf`,
-  `HospitalLowEnergy.idf`, `LargeOfficeDetailed.idf`
-- DOE commercial reference buildings (small, medium, large office)
-
-**Team:** 5-7 engineers (3 HVAC, 2 plant, 1 controls, 1 integration/test)
-
-**Key risks:**
-- HVAC module count is staggering (100,000+ lines in E+)
-- Controller convergence is subtle and model-dependent
-- Plant loop solver convergence with diverse equipment mixes
-- Autosizing circular dependencies
-
-### Phase 4 -- Advanced Features (Months 21-26)
-
-**Objective:** Complete the feature set with advanced capabilities.
-
-**Deliverables:**
-- `ep-ems`: Scripting engine (Rhai-based), actuator/sensor registry
-- `ep-fmi`: FMI 2.0 co-simulation interface
-- `ep-generation`: PV, wind, fuel cell, battery, inverter models
-- `ep-refrigeration`: Supermarket refrigeration systems
-- `ep-water`: DHW, solar thermal, stratified tanks
-- `ep-demand`: Demand-side management
-- `ep-windows`: Complex fenestration (BSDF), equivalent layer model
-- `ep-daylighting`: Full radiosity model, TDD
-- `ep-ground`: Kiva integration (FFI or rewrite)
-- `ep-api`: C API and Python bindings (PyO3)
-
-**Entry criteria:** Phase 3 complete and passing HVAC validation.
-
-**Exit criteria:**
-- All advanced features produce results within 2% of EnergyPlus
-- Python API provides equivalent functionality to EnergyPlus Python API
-- FMI co-simulation works with standard FMU test cases
-
-**Validation targets:**
-- EnergyPlus example files using advanced features
-- PV/battery test cases from SAM validation suite
-- FMI compliance tests
-
-**Team:** 4-6 engineers (specialists per domain)
-
-### Phase 5 -- Parity & Validation (Months 27-30)
-
-**Objective:** Achieve full validation parity with EnergyPlus and production readiness.
-
-**Deliverables:**
-- Complete ASHRAE Standard 140 (BESTEST) compliance
-- Regression testing against all 822 EnergyPlus example files
-- Performance benchmarking (target: 2x faster than E+ for sequential, 4-8x with parallelism)
-- Documentation: mdBook user guide, rustdoc API reference
-- IDF-to-new-format migration tool
-- OpenStudio SDK integration layer
-- Release packaging and distribution
-
-**Entry criteria:** Phase 4 complete, all major features implemented.
-
-**Exit criteria:**
-- BESTEST compliance for all applicable test cases
-- 95%+ of example files produce results within 2% tolerance
-- Performance meets or exceeds targets
-- Documentation complete
-- Package builds for Linux, macOS, Windows
-
-**Validation targets:**
-- Full BESTEST suite (Standard 140-2017 and later)
-- All 822 EnergyPlus example IDF files
-- DOE commercial prototype buildings
-- ASHRAE 90.1 appendix G baseline models
-- Empirical validation against measured building data (where available)
-
-**Team:** 4-5 engineers (2 validation, 1 performance, 1 docs, 1 integration)
+**Exit criteria:** The 20 most common EnergyPlus example file equipment configurations can be simulated.
 
 ---
 
-## 4. Validation & Testing Strategy
+## 9. Phase 12: Advanced Features & Parity
 
-### 4.1 Regression Testing Against EnergyPlus
+**Goal:** Full professional-grade simulation capability. BESTEST 600/900 series complete. 50+ example files run correctly.
 
-The primary validation method is regression testing: running identical input files
-through both EnergyPlus and the Rust engine, then comparing outputs.
+### 12.1 Thermal Comfort (new crate: ep-comfort)
 
-**`ep-diff` tool:**
+- Fanger PMV/PPD (ISO 7730)
+- ASHRAE 55 adaptive comfort
+- CEN 15251 adaptive comfort
+- Pierce/KSU two-node thermoregulation (Runge-Kutta ODE)
+- Simple ASHRAE 55 summer/winter check
+- Ankle draft and ceiling fan cooling effect
 
-```rust
-// tools/ep-diff/src/main.rs
+*~40 tests, C++ reference:* `ThermalComfort.cc` (3.2K lines)
 
-/// Compare two simulation output files within tolerance.
-pub struct OutputComparison {
-    pub file_a: PathBuf,           // EnergyPlus reference
-    pub file_b: PathBuf,           // Rust engine output
-    pub absolute_tolerance: f64,   // Default: 0.01
-    pub relative_tolerance: f64,   // Default: 0.001 (0.1%)
-    pub results: Vec<VariableComparison>,
-}
+### 12.2 Room Air Models
 
-pub struct VariableComparison {
-    pub name: String,
-    pub key: String,
-    pub max_absolute_diff: f64,
-    pub max_relative_diff: f64,
-    pub rms_diff: f64,
-    pub num_timesteps: usize,
-    pub pass: bool,
-}
-```
+- Underfloor air distribution (UFAD) with 3-zone stratification
+- Cross-ventilation two-node model
+- Displacement ventilation
+- User-defined temperature patterns
 
-**Tolerance tiers:**
-- **Tier 1 (strict):** < 0.01% relative difference. For temperatures (degC),
-  flow rates, energy totals. Required for foundation modules (weather, psychrometrics).
-- **Tier 2 (standard):** < 1% relative difference. For zone loads, equipment
-  energy consumption, heating/cooling demand. Required for BESTEST compliance.
-- **Tier 3 (relaxed):** < 5% relative difference. For complex HVAC models
-  where iterative convergence may differ. Acceptable during initial porting.
+*~30 tests, C++ reference:* 5 files (~5K lines total)
 
-### 4.2 Property-Based Testing
+### 12.3 CondFD Conduction (Finite Difference)
 
-Use `proptest` for numerical kernels:
+Add to ep-envelope:
+- Crank-Nicolson semi-implicit scheme
+- Fully implicit first-order scheme
+- Phase change material support (enthalpy method with latent heat)
+- Variable conductivity materials
+- Moisture vapor transport (partial pressure driven)
+- Adaptive node spacing (fine at boundaries, coarse interior)
 
-```rust
-// Example: property test for psychrometric functions
-use proptest::prelude::*;
+*~25 tests, C++ reference:* `HeatBalFiniteDiffManager.cc` (2.8K lines)
 
-proptest! {
-    #[test]
-    fn humidity_ratio_roundtrip(
-        tdb in -40.0f64..60.0,
-        rh in 1.0f64..100.0,
-        p in 80000.0f64..110000.0,
-    ) {
-        let w = humidity_ratio_from_rh(
-            Temperature::from_celsius(tdb),
-            RelativeHumidity::new(rh),
-            Pressure::new(p),
-        );
-        let rh_back = rh_from_humidity_ratio(
-            Temperature::from_celsius(tdb),
-            w,
-            Pressure::new(p),
-        );
-        prop_assert!((rh_back.value() - rh).abs() < 0.01);
-    }
+### 12.4 Advanced Fenestration
 
-    #[test]
-    fn ctf_energy_conservation(
-        layers in prop::collection::vec(
-            (0.01f64..1.0, 0.1..5.0, 500.0..2500.0, 500.0..2000.0),
-            1..5
-        ),
-    ) {
-        // CTF coefficients must conserve energy: sum of all response
-        // factors should equal steady-state U-value
-        let construction = build_construction_from_layers(&layers);
-        let ctf = compute_ctf(&construction);
-        let u_ctf = ctf_steady_state_u_value(&ctf);
-        let u_analytic = analytic_u_value(&construction);
-        prop_assert!((u_ctf - u_analytic).abs() / u_analytic < 0.001);
-    }
-}
-```
+Expand ep-windows:
+- Equivalent layer (EQL) model for complex shading assemblies
+- BSDF (Bidirectional Scattering Distribution Function) for directional glazing
+- Switchable glazing (electrochromic, thermochromic) with switching factor
+- Complex fenestration states with multi-state control logic
 
-### 4.3 ASHRAE Standard 140 (BESTEST) Roadmap
+*~30 tests, C++ reference:* `WindowEquivalentLayer.cc` (8.1K) + `WindowComplexManager.cc` (3.5K)
 
-| Test Case | Description | Phase | Priority |
-|-----------|-------------|-------|----------|
-| 600-650 | Low-mass, lightweight building | Phase 1 | High |
-| 900-960 | High-mass, heavyweight building | Phase 2 | High |
-| HE100-HE230 | Heating equipment (furnaces, heat pumps) | Phase 3a | High |
-| CE100-CE545 | Cooling equipment (DX coils) | Phase 3b | High |
-| GC10-GC80 | Ground-coupled slab-on-grade | Phase 1-2 | Medium |
-| IN-DEPTH | Window properties | Phase 1 | Medium |
-| Airflow | Multi-zone airflow | Phase 2 | Medium |
-| HVAC BESTEST | Full HVAC system tests | Phase 3c | High |
+### 12.5 Enhanced Ground Heat Transfer
 
-### 4.4 Continuous Integration Pipeline
+Expand ep-ground:
+- Kiva-compatible foundation model (2D cross-section FD solver)
+- Slab-on-grade with perimeter insulation
+- Basement below-grade wall coupling
+- Soil moisture effects on thermal conductivity
 
-```yaml
-# .github/workflows/ci.yml
-name: CI
-on: [push, pull_request]
+*~20 tests, C++ reference:* `HeatBalanceKivaManager.cc` (1.3K) + kiva library
 
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check --workspace --all-features
-      - run: cargo clippy --workspace -- -D warnings
-      - run: cargo fmt --check
+### 12.6 Full Airflow Network
 
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - run: cargo test --workspace
+Expand ep-airflow:
+- Duct distribution system (friction, leakage, heat transfer)
+- Wind pressure coefficients (terrain + building shape)
+- Occupant-controlled ventilation (comfort triggers, opening probability)
+- Hybrid mode (distribution when HVAC on, multizone when off)
+- Additional components: coil ΔP, relief damper, zone exhaust fan
 
-  benchmark:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - run: cargo bench --workspace -- --output-format bencher | tee bench.txt
-      - uses: benchmark-action/github-action-benchmark@v1
+*~30 tests, C++ reference:* `AirflowNetwork/` (22K lines total)
 
-  regression:
-    runs-on: ubuntu-latest
-    needs: test
-    steps:
-      - run: cargo build --release
-      - run: python tests/regression/run_regression.py --tolerance 0.01
-```
+### 12.7 Complete Output System
 
-### 4.5 Fuzzing Strategy
+Expand ep-output:
+- All predefined tabular reports (LEED, ASHRAE 90.1, equipment summaries, zone loads)
+- Monthly/annual aggregation with time-of-peak tracking
+- ResultsFramework structured output
+- Full ESO/MTR/CSV/SQL format compliance
 
-Fuzz input parsing to find crashes and panics:
+*~40 tests, C++ reference:* `OutputReportTabular.cc` (19.7K lines)
 
-```rust
-// fuzz/fuzz_targets/idf_parser.rs
-#![no_main]
-use libfuzzer_sys::fuzz_target;
+### 12.8 Full IDF Schema
 
-fuzz_target!(|data: &[u8]| {
-    if let Ok(text) = std::str::from_utf8(data) {
-        let _ = ep_io::idf::parse_idf(text);
-    }
-});
-```
+Expand ep-io to cover remaining ~850 object types with validation.
 
-Run with `cargo fuzz run idf_parser` using `cargo-fuzz`.
+### Phase 12 Tests (~200+ new)
 
-### 4.6 Numerical Tolerance
-
-**Policy:** The Rust engine targets bit-for-bit reproducibility across runs
-on the same platform. Cross-platform reproducibility is a non-goal due to
-hardware floating-point differences, but results should be within Tier 1
-tolerance across platforms.
-
-**Implementation:**
-- No `f64::fast_math` or `-ffast-math` equivalents
-- Summation order is deterministic (fixed iteration order)
-- Random seed is configurable for any stochastic operations
-- Parallel operations use indexed access, not order-dependent reductions
+**Exit criteria:** BESTEST 600/610/620/630/900/910/920/930 all pass. 50+ standard example files run with results within 5% of C++ EnergyPlus.
 
 ---
 
-## 5. Build & Tooling
+## 10. Crate-Level Summary
 
-### 5.1 Cargo Workspace Configuration
-
-```toml
-# Cargo.toml (workspace root)
-[workspace]
-resolver = "2"
-members = [
-    "crates/ep-units",
-    "crates/ep-core",
-    "crates/ep-psychrometrics",
-    "crates/ep-fluids",
-    "crates/ep-curves",
-    "crates/ep-weather",
-    "crates/ep-schedule",
-    "crates/ep-io",
-    "crates/ep-materials",
-    "crates/ep-surfaces",
-    "crates/ep-solar",
-    "crates/ep-envelope",
-    "crates/ep-windows",
-    "crates/ep-daylighting",
-    "crates/ep-zone",
-    "crates/ep-airflow",
-    "crates/ep-hvac",
-    "crates/ep-plant",
-    "crates/ep-refrigeration",
-    "crates/ep-water",
-    "crates/ep-generation",
-    "crates/ep-ground",
-    "crates/ep-ems",
-    "crates/ep-demand",
-    "crates/ep-output",
-    "crates/ep-fmi",
-    "crates/ep-sizing",
-    "crates/ep-sim",
-    "crates/ep-api",
-    "tools/idf-convert",
-    "tools/ep-diff",
-]
-
-[workspace.dependencies]
-# Shared dependency versions
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-anyhow = "1"
-rayon = "1"
-ndarray = "0.16"
-chrono = { version = "0.4", default-features = false }
-rusqlite = { version = "0.32", features = ["bundled"] }
-csv = "1"
-log = "0.4"
-rhai = "1"
-
-[profile.release]
-lto = "thin"
-codegen-units = 4
-opt-level = 3
-```
-
-### 5.2 Benchmarking Framework
-
-Use `criterion` for micro-benchmarks:
-
-```rust
-// crates/ep-psychrometrics/benches/psychrometrics.rs
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use ep_psychrometrics::*;
-use ep_units::*;
-
-fn bench_saturation_pressure(c: &mut Criterion) {
-    c.bench_function("saturation_pressure", |b| {
-        b.iter(|| {
-            for t in -40..60 {
-                black_box(saturation_pressure(Temperature::from_celsius(t as f64)));
-            }
-        })
-    });
-}
-
-fn bench_humidity_ratio(c: &mut Criterion) {
-    c.bench_function("humidity_ratio_from_tdb_twb", |b| {
-        b.iter(|| {
-            black_box(humidity_ratio(
-                Temperature::from_celsius(35.0),
-                Temperature::from_celsius(25.0),
-                Pressure::new(101325.0),
-            ))
-        })
-    });
-}
-
-criterion_group!(benches, bench_saturation_pressure, bench_humidity_ratio);
-criterion_main!(benches);
-```
-
-### 5.3 FFI Strategy for Transition Period
-
-During the multi-year migration, some C/C++ libraries will be called via FFI:
-
-```rust
-// crates/ep-ground/src/kiva_ffi.rs
-
-#[link(name = "kiva")]
-extern "C" {
-    fn kiva_create_instance(config: *const KivaConfig) -> *mut KivaInstance;
-    fn kiva_set_boundary_conditions(
-        instance: *mut KivaInstance,
-        indoor_temp: f64,
-        outdoor_temp: f64,
-        wind_speed: f64,
-    );
-    fn kiva_solve(instance: *mut KivaInstance) -> f64;  // returns heat flux
-    fn kiva_destroy(instance: *mut KivaInstance);
-}
-
-/// Safe wrapper around Kiva C library.
-pub struct KivaFoundation {
-    instance: *mut KivaInstance,
-}
-
-impl Drop for KivaFoundation {
-    fn drop(&mut self) {
-        unsafe { kiva_destroy(self.instance); }
-    }
-}
-
-// Safety: KivaInstance is used single-threaded within the simulation loop.
-unsafe impl Send for KivaFoundation {}
-```
-
-**Libraries requiring FFI during transition:**
-- Kiva (ground heat transfer) -- until pure Rust implementation
-- Windows-CalcEngine (Tarcog) -- until pure Rust window thermal model
-- DElight (daylighting) -- until Rust radiosity implementation
-- Penumbra (GPU shading) -- optional, may keep as C++ with FFI permanently
-
-### 5.4 Python Bindings (PyO3)
-
-```rust
-// crates/ep-api/src/python.rs
-
-use pyo3::prelude::*;
-
-#[pyclass]
-pub struct EnergyPlusSimulation {
-    state: SimulationState,
-    orchestrator: SimulationOrchestrator,
-}
-
-#[pymethods]
-impl EnergyPlusSimulation {
-    #[new]
-    fn new() -> Self { /* ... */ }
-
-    fn load_input(&mut self, path: &str) -> PyResult<()> { /* ... */ }
-
-    fn run(&mut self) -> PyResult<()> {
-        self.orchestrator.run(&mut self.state)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
-    }
-
-    fn get_variable(&self, name: &str, key: &str) -> PyResult<f64> { /* ... */ }
-
-    fn set_actuator(&mut self, name: &str, value: f64) -> PyResult<()> { /* ... */ }
-}
-
-#[pymodule]
-fn energyplus_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<EnergyPlusSimulation>()?;
-    Ok(())
-}
-```
-
-### 5.5 WebAssembly Target
-
-For browser-based simulations (design tools, education):
-
-```toml
-# crates/ep-sim/Cargo.toml
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "0.2"
-```
-
-Compile with: `cargo build --target wasm32-unknown-unknown --release`
-
-Note: WebAssembly builds exclude FFI dependencies (Kiva, Penumbra) and
-file I/O. Weather data and inputs must be provided as in-memory buffers.
-
-### 5.6 Documentation Strategy
-
-- **rustdoc:** Every public API has doc comments with examples
-- **mdBook:** User guide covering installation, input format, running simulations
-- **Engineering Reference:** Port key algorithm descriptions from EnergyPlus
-  Engineering Reference, with references to the original document sections
+| Crate | Current Tests | Phase(s) | Target Tests |
+|-------|:------------:|----------|:------------:|
+| ep-units | 22 | — | 22 |
+| ep-core | 14 | 10 | 20 |
+| ep-psychrometrics | 31 | — | 31 |
+| ep-fluids | 8 | — | 10 |
+| ep-curves | 41 | — | 45 |
+| ep-weather | 31 | — | 35 |
+| ep-schedule | 40 | — | 40 |
+| ep-materials | 18 | 6 | 25 |
+| ep-io | 48 | 10, 12 | 120 |
+| ep-surfaces | 20 | 6 | 40 |
+| ep-envelope | 36 | 6, 12 | 100 |
+| ep-windows | 22 | 6, 7, 12 | 60 |
+| ep-solar | 16 | 7 | 50 |
+| ep-ground | 18 | 12 | 35 |
+| ep-zone-air | 19 | 8, 10, 12 | 60 |
+| ep-internal-gains | 14 | — | 15 |
+| ep-airflow | 24 | 12 | 50 |
+| ep-daylighting | 50 | 7 | 70 |
+| ep-nodes | 32 | — | 35 |
+| ep-fans | 16 | 8 | 25 |
+| ep-coils | 20 | 8, 11 | 60 |
+| ep-plant | 66 | 9, 11 | 120 |
+| ep-hvac | 15 | 8, 11 | 150 |
+| ep-ems | 42 | — | 50 |
+| ep-fmi | 7 | — | 10 |
+| ep-generation | 34 | — | 40 |
+| ep-demand | 21 | — | 25 |
+| ep-sim | 48 | 10 | 100 |
+| ep-validation | 20 | 10 | 40 |
+| ep-refrigeration | 25 | — | 30 |
+| ep-water | 21 | — | 30 |
+| ep-api | 6 | — | 10 |
+| ep-output | 43 | 10, 12 | 80 |
+| **ep-comfort** (new) | 0 | 12 | 40 |
+| **Total** | **824** | | **~1,760** |
 
 ---
 
-## 6. Comparison with Existing Efforts
-
-### 6.1 Spawn of EnergyPlus (LBNL)
-
-Spawn was LBNL's project to couple EnergyPlus's envelope model with Modelica-based
-HVAC simulation. It was partially funded by DOE but has seen limited adoption.
-
-**Key differences from this Rust rewrite:**
-- Spawn kept EnergyPlus's C++ envelope code and only replaced HVAC with Modelica.
-  This rewrite replaces everything.
-- Spawn required a Modelica runtime (OpenModelica or Dymola), adding significant
-  complexity. The Rust engine is a single binary with no runtime dependencies.
-- Spawn's two-language architecture created integration challenges at the
-  envelope-HVAC boundary. A single-language Rust implementation avoids this.
-
-### 6.2 Modelica-Based Tools (OpenModelica, Modelon)
-
-Modelica tools like the LBNL Buildings library model HVAC systems as equation-based
-component networks. They excel at controls research but struggle with whole-building
-simulation performance and input complexity.
-
-**Advantages of the Rust approach:**
-- Compile to a single native binary (no Modelica runtime)
-- Explicit solver control vs. Modelica's DAE solver overhead
-- Better performance for annual simulations (10-100x faster than Modelica)
-- Direct backward compatibility with EnergyPlus input files
-
-### 6.3 PassiveLogic
-
-PassiveLogic is developing a proprietary real-time physics engine for digital twins.
-It targets real-time control rather than annual energy simulation.
-
-**Advantages of the Rust approach:**
-- Open source (BSD license) vs. proprietary
-- Validated against ASHRAE Standard 140
-- Full annual simulation capability
-- Ecosystem compatibility (OpenStudio, Ladybug Tools)
-
-### 6.4 OpenStudio SDK
-
-OpenStudio is a middleware layer on top of EnergyPlus that provides building model
-construction, measure-based workflows, and results processing.
-
-**Integration strategy:** The Rust engine should provide a compatibility API
-that allows OpenStudio to use it as a drop-in replacement for the EnergyPlus
-executable. This requires:
-- IDF input file compatibility
-- SQL output file compatibility
-- C API compatibility (for OpenStudio's EnergyPlus function calls)
-- Command-line interface compatibility
-
-### 6.5 Why Rust?
-
-| Factor | C++ (status quo) | Rust | Modelica | Python |
-|--------|-----------------|------|----------|--------|
-| Memory safety | Manual | Compile-time | Runtime (GC) | Runtime (GC) |
-| Performance | Excellent | Excellent | Good | Poor |
-| Concurrency | Error-prone | Safe by design | Limited | GIL-limited |
-| Build time | Minutes (with PCH) | Minutes | N/A | N/A |
-| Ecosystem | Mature | Growing rapidly | Niche | Excellent |
-| Error handling | Ad-hoc | Type-safe Result | Exceptions | Exceptions |
-| Testing | GoogleTest | Built-in | Limited | pytest |
-| WASM support | Difficult | Native | No | Pyodide |
-| Package management | CMake (fragile) | Cargo (excellent) | Tool-specific | pip |
-
-**Key Rust advantages for this project:**
-1. **Memory safety without GC:** EnergyPlus has known memory bugs (use-after-free,
-   buffer overflows) that Rust's ownership system prevents at compile time
-2. **Fearless concurrency:** Safe parallelism for independent zone/surface calculations
-3. **Type-safe units:** Compile-time unit checking prevents physics bugs
-4. **Cargo ecosystem:** Vastly simpler dependency management than CMake
-5. **WASM compilation:** Enables browser-based simulation tools
-6. **Modern error handling:** `Result<T, E>` replaces the `ShowFatalError` pattern
-
----
-
-## 7. Open Questions & Decision Points
-
-### 7.1 Fixed vs. Variable Timestep
-
-**Current EnergyPlus:** Fixed timestep (user-selected: 1, 2, 3, 4, 5, 6, 10, 12,
-15, 20, 30, 60 minutes). HVAC uses a system timestep that can subdivide the zone timestep.
-
-**Options:**
-- **A) Keep fixed timestep:** Simpler, deterministic, matches E+ behavior for validation
-- **B) Adaptive timestep:** Better accuracy during transients (sunrise, HVAC startup),
-  but harder to validate and may affect output time alignment
-
-**Recommendation:** Start with fixed timestep for validation parity.
-Add adaptive timestep as an optional feature in Phase 5.
-
-### 7.2 Input Format
-
-**Options:**
-- **A) IDF-only:** Maximum backward compatibility, but perpetuates a difficult format
-- **B) IDF + new format:** Support both, with a migration tool
-- **C) New format only:** Clean break, but alienates existing users
-
-**Recommendation:** Option B. Support IDF for backward compatibility, but design
-a new format (likely TOML-based or custom DSL) that is the primary input method.
-Provide an `idf-convert` tool for migration.
-
-```toml
-# Example new format (TOML-based)
-[building]
-name = "Small Office"
-north_axis = 0.0
-terrain = "suburbs"
-
-[[zone]]
-name = "Core Zone"
-volume = 500.0  # m3
-floor_area = 200.0  # m2
-
-[[zone.surface]]
-name = "South Wall"
-type = "wall"
-construction = "Steel Frame Wall"
-outside_boundary = "outdoors"
-vertices = [
-    [0.0, 0.0, 0.0],
-    [10.0, 0.0, 0.0],
-    [10.0, 0.0, 3.0],
-    [0.0, 0.0, 3.0],
-]
-```
-
-### 7.3 Scripting Language for EMS
-
-**Options:**
-- **A) Rhai:** Pure Rust, sandboxed, safe. But different syntax from Erl.
-- **B) Lua (via rlua):** Widely used in game engines, fast. Familiar to many engineers.
-- **C) Python (via PyO3):** Most familiar to building energy community. But heavy runtime.
-- **D) Keep Erl:** Maximum compatibility. But Erl is a poor language.
-
-**Recommendation:** Option A (Rhai) as the primary scripting language, with
-Python (Option C) available as an optional plugin system. Provide an
-Erl-to-Rhai transpiler for migration.
-
-### 7.4 Parallelism vs. Determinism
-
-**Constraint:** Building energy simulations are used for code compliance and
-certification. Results must be reproducible.
-
-**Policy:**
-- Default mode: deterministic (sequential execution, bit-reproducible)
-- Optional `--parallel` flag enables Rayon-based parallelism
-- Parallel results must be within Tier 1 tolerance of sequential results
-- Parallel results are reproducible for a given thread count and platform
-
-### 7.5 Licensing
-
-**Recommendation:** BSD-3-Clause or Apache-2.0 + MIT dual license, matching
-EnergyPlus's open-source model. The engine should remain freely available
-for commercial and academic use.
-
-### 7.6 IDF Backward Compatibility
-
-**Question:** How many versions of IDF should the Rust engine support?
-
-**Recommendation:** Support the current IDF version (matching the latest EnergyPlus
-release). Provide the `idf-convert` tool to upgrade older IDF files. Do not
-attempt to support the full history of IDF format changes in the parser.
-
-### 7.7 Relationship to EnergyPlus
-
-**Question:** Is this a fork, a successor, or an independent project?
-
-**Recommendation:** Independent project with EnergyPlus validation parity.
-Position it as a next-generation engine that can serve the same use cases
-but with better performance, safety, and extensibility. Maintain close
-collaboration with the EnergyPlus development team at NREL/LBNL for
-algorithm validation and testing methodology.
-
----
-
-## Appendix A: Effort Summary
-
-| Crate | Lines (est.) | Person-Months | Difficulty |
-|-------|-------------|--------------|------------|
-| ep-units | 500 | 0.5 | Low |
-| ep-core | 2,000 | 1.5 | Medium |
-| ep-psychrometrics | 800 | 0.5 | Low |
-| ep-fluids | 2,000 | 1.5 | Medium |
-| ep-curves | 1,500 | 1 | Low |
-| ep-weather | 5,000 | 3 | Medium |
-| ep-schedule | 3,500 | 2 | Low-Medium |
-| ep-io | 5,000 | 3.5 | Medium |
-| ep-materials | 2,000 | 1 | Low |
-| ep-surfaces | 4,000 | 2.5 | Medium |
-| ep-solar | 7,000 | 4.5 | High |
-| ep-envelope | 14,000 | 7 | Very High |
-| ep-windows | 11,000 | 6 | Very High |
-| ep-daylighting | 6,000 | 4.5 | High |
-| ep-zone | 7,000 | 4.5 | High |
-| ep-airflow | 10,000 | 6 | High |
-| ep-hvac | 48,000 | 21 | Very High |
-| ep-plant | 30,000 | 14 | Very High |
-| ep-refrigeration | 9,000 | 5 | High |
-| ep-water | 9,000 | 5 | High |
-| ep-generation | 7,000 | 4 | Medium-High |
-| ep-ground | 5,000 | 3.5 | High |
-| ep-ems | 6,000 | 4.5 | High |
-| ep-demand | 2,000 | 1.5 | Medium |
-| ep-output | 10,000 | 5 | Medium-High |
-| ep-fmi | 2,500 | 2.5 | Medium |
-| ep-sizing | 5,000 | 3 | High |
-| ep-sim | 7,000 | 4.5 | High |
-| ep-api | 3,000 | 2 | Medium |
-| Tools | 3,000 | 2 | Low |
-| **Total** | **~227,000** | **~127** | |
-
-**Total estimated effort: ~127 person-months (10.6 person-years)**
-
-With a core team of 5 engineers, the project would take approximately
-**2.5 years** for Phase 0-4 and **3 years** to reach full parity (Phase 5).
-
-With a team of 8 engineers (allowing more parallelism between subsystems),
-the timeline compresses to approximately **2 years** to Phase 4 and
-**2.5 years** to full parity.
-
----
-
-## Appendix B: Dependency Graph
+## 11. Priority & Dependencies
 
 ```
-ep-units (no deps)
-    |
-ep-core (ep-units)
-    |
-    +-- ep-psychrometrics (ep-units, ep-core)
-    +-- ep-fluids (ep-units, ep-core)
-    +-- ep-curves (ep-units, ep-core)
-    +-- ep-schedule (ep-units, ep-core)
-    +-- ep-io (ep-core, serde, serde_json)
-    +-- ep-output (ep-core, rusqlite, csv)
-    |
-ep-weather (ep-units, ep-core, ep-psychrometrics)
-    |
-ep-materials (ep-units, ep-core)
-    |
-ep-surfaces (ep-units, ep-core, ep-materials)
-    |
-ep-solar (ep-units, ep-core, ep-weather, ep-surfaces)
-    |
-ep-envelope (ep-units, ep-core, ep-materials, ep-surfaces, ep-solar)
-    |
-ep-windows (ep-units, ep-core, ep-materials, ep-solar)
-    |
-ep-daylighting (ep-units, ep-core, ep-solar, ep-windows, ep-surfaces)
-    |
-ep-zone (ep-units, ep-core, ep-schedule, ep-psychrometrics)
-    |
-ep-airflow (ep-units, ep-core, ep-psychrometrics)
-    |
-ep-hvac (ep-units, ep-core, ep-psychrometrics, ep-fluids, ep-curves, ep-schedule, ep-sizing)
-    |
-ep-plant (ep-units, ep-core, ep-fluids, ep-curves, ep-schedule)
-    |
-ep-sim (ALL crates)
-    |
-ep-api (ep-sim, pyo3)
+Phase 6 (Heat Balance) ──────────────────────┐
+    │                                         │
+    ▼                                         │
+Phase 7 (Solar/Shading)                       │
+    │                                         │
+    ▼                                         ▼
+Phase 10 (Simulation Driver) ◄── Phase 8 (HVAC) + Phase 9 (Plant)
+    │                                    [can run in parallel]
+    ▼
+Phase 11 (Equipment Breadth)
+    │
+    ▼
+Phase 12 (Advanced Features & Parity)
 ```
 
----
+- **Phase 6 → 7:** Sequential (solar needs surfaces to absorb onto)
+- **Phase 8 ↔ 9:** Parallel (air-side and water-side are somewhat independent)
+- **Phase 10:** Depends on 6, 7, 8, 9 all being functional
+- **Phase 11 ↔ 12:** Can overlap, done incrementally
 
-## Appendix C: EnergyPlus Source File Mapping
+### Critical Milestones
 
-The following table maps EnergyPlus C++ source files to their target Rust crate.
-Files are listed in order of size (largest first).
-
-| E+ Source File | Lines | Target Crate |
-|---------------|-------|-------------|
-| OutputReportTabular.cc | 19,749 | ep-output |
-| UnitarySystem.cc | 18,344 | ep-hvac |
-| DXCoils.cc | 18,068 | ep-hvac |
-| RefrigeratedCase.cc | 16,340 | ep-refrigeration |
-| HVACVariableRefrigerantFlow.cc | 15,565 | ep-hvac |
-| SurfaceGeometry.cc | 15,535 | ep-surfaces |
-| WaterThermalTanks.cc | 13,199 | ep-water |
-| SolarShading.cc | 13,085 | ep-solar |
-| Furnaces.cc | 11,199 | ep-hvac |
-| DaylightingManager.cc | 10,099 | ep-daylighting |
-| HeatBalanceSurfaceManager.cc | 10,094 | ep-envelope |
-| WeatherManager.cc | 8,867 | ep-weather |
-| InternalHeatGains.cc | 8,823 | ep-schedule |
-| WindowManager.cc | 8,564 | ep-windows |
-| WindowEquivalentLayer.cc | 8,108 | ep-windows |
-| StandardRatings.cc | 7,816 | ep-hvac |
-| SimAirServingZones.cc | 7,767 | ep-hvac |
-| VariableSpeedCoils.cc | 7,723 | ep-hvac |
-| PlantChillers.cc | 7,542 | ep-plant |
-| ZoneTempPredictorCorrector.cc | 7,222 | ep-zone |
-| ZoneEquipmentManager.cc | 7,098 | ep-hvac |
-| FluidProperties.cc | 6,974 | ep-fluids |
-| ConvectionCoefficients.cc | 6,610 | ep-envelope |
-| WaterCoils.cc | 6,375 | ep-hvac |
-| CondenserLoopTowers.cc | 6,330 | ep-plant |
-| HeatBalanceManager.cc | 6,131 | ep-envelope |
-| PlantPipingSystemsManager.cc | 6,111 | ep-ground |
-| LowTempRadiantSystem.cc | 6,016 | ep-plant |
-| SingleDuct.cc | 5,859 | ep-hvac |
+| Milestone | Phase | Validation |
+|-----------|-------|------------|
+| Surface temps converge | 6 | Zone energy balance < 1% |
+| Solar gains correct | 7 | BESTEST 600 solar within 5% |
+| Single-zone HVAC works | 8 | Zone temp at setpoint under design day |
+| Plant loop converges | 9 | Chiller/tower energy within 5% |
+| **First IDF runs end-to-end** | **10** | **BESTEST Case 600 passes** |
+| 20 example configs work | 11 | Multi-zone VAV systems |
+| Full BESTEST suite | 12 | 600/900 series all pass |
 
 ---
 
-*End of EnergyPlus Rust Rewrite Plan v1.0*
+## 12. Verification Strategy
+
+### 12.1 Test Hierarchy
+
+1. **Unit tests** (per function): Analytical solutions, published correlation values
+2. **Component tests** (per equipment): Known inlet conditions → known outlet, known energy
+3. **Integration tests** (per loop): Air loop or plant loop converges to known steady state
+4. **System tests** (end-to-end): Full IDF → compare output against C++ EnergyPlus reference
+5. **BESTEST** (gold standard): ASHRAE Standard 140 acceptance ranges
+
+### 12.2 Reference IDF Files
+
+Progressive validation targets:
+
+| Phase | IDF File | What It Tests |
+|-------|----------|---------------|
+| 6 | `1ZoneUncontrolled.idf` | Heat balance only, no HVAC |
+| 7 | Custom: south window test | Solar gain through window |
+| 8 | `1ZoneEvapCooler.idf` | Simple single-zone HVAC |
+| 9 | Custom: chiller loop test | Plant loop convergence |
+| 10 | BESTEST Case 600 | Full envelope + simple HVAC |
+| 11 | `5ZoneAirCooled.idf` | Multi-zone VAV system |
+| 12 | BESTEST 600–930 series | Full validation suite |
+
+### 12.3 Regression Testing
+
+- Store C++ EnergyPlus reference outputs (ESO/MTR) for each target IDF
+- Automated comparison: Rust output vs. reference at each timestep
+- Tolerance: 0.1°C for temperatures, 1% for energy, 5% for peak loads
+- CI pipeline: `cargo test --workspace` + regression comparison
+
+### 12.4 Numerical Considerations
+
+- CTF coefficients: converge to 1e-13 ratio cutoff
+- Surface temperature iteration: converge to 0.001°C
+- HVAC loop: converge to 0.01°C supply air temp, 0.001 kg/s flow
+- Plant loop: converge to 0.1°C supply water temp
+- Float reproducibility: use deterministic summation order for cross-platform consistency
