@@ -138,6 +138,230 @@ pub fn local_wind_speed(
     met_wind_speed * site_factor / met_factor
 }
 
+// ─── Walton Interior Correlations ────────────────────────────────────
+
+/// Walton unstable tilted surface correlation.
+///
+/// For tilted surfaces with buoyancy-enhanced (unstable) convection.
+/// h = 9.482 * |ΔT|^(1/3) / (7.283 - |cos(tilt)|)
+///
+/// Reference: Walton, G.N. 1983.
+pub fn walton_unstable_tilted(delta_t: f64, cos_tilt: f64) -> f64 {
+    let dt_abs = delta_t.abs();
+    if dt_abs < 1e-10 {
+        return 0.1;
+    }
+    let denom = 7.283 - cos_tilt.abs();
+    if denom > 0.001 {
+        9.482 * dt_abs.powf(1.0 / 3.0) / denom
+    } else {
+        1.31 * dt_abs.powf(1.0 / 3.0)
+    }
+}
+
+/// Walton stable tilted surface correlation.
+///
+/// For tilted surfaces with buoyancy-suppressed (stable) convection.
+/// h = 1.810 * |ΔT|^(1/3) / (1.382 + |cos(tilt)|)
+///
+/// Reference: Walton, G.N. 1983.
+pub fn walton_stable_tilted(delta_t: f64, cos_tilt: f64) -> f64 {
+    let dt_abs = delta_t.abs();
+    if dt_abs < 1e-10 {
+        return 0.1;
+    }
+    1.810 * dt_abs.powf(1.0 / 3.0) / (1.382 + cos_tilt.abs())
+}
+
+/// Ceiling diffuser interior convection coefficient (Fisher/Pedersen).
+///
+/// h = C * (ACH)^a * |ΔT|^b
+/// where ACH = air changes per hour, C/a/b depend on surface type.
+///
+/// Reference: Fisher, D.E. and C.O. Pedersen. 1997.
+pub fn ceiling_diffuser_convection(
+    delta_t: f64,
+    cos_tilt: f64,
+    ach: f64, // air changes per hour
+) -> f64 {
+    let dt_abs = delta_t.abs().max(0.001);
+    let ach_val = ach.max(0.0);
+
+    if cos_tilt.abs() < 0.3827 {
+        // Wall: h = 1.208 * ACH^0.467 + 1.31 * |ΔT|^(1/3)
+        let h_forced = if ach_val > 0.0 {
+            1.208 * ach_val.powf(0.467)
+        } else {
+            0.0
+        };
+        let h_natural = 1.31 * dt_abs.powf(1.0 / 3.0);
+        (h_forced * h_forced + h_natural * h_natural).sqrt()
+    } else if cos_tilt > 0.0 {
+        // Floor (upward-facing): h = 3.873 + 0.082 * ACH^0.98
+        3.873 + 0.082 * ach_val.powf(0.98)
+    } else {
+        // Ceiling (downward-facing): h = 0.49 + 0.327 * ACH^1.0
+        0.49 + 0.327 * ach_val
+    }
+}
+
+// ─── Enhanced Model Selection ────────────────────────────────────────
+
+/// Interior convection model type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InteriorConvectionModel {
+    /// Simple ASHRAE fixed values.
+    Simple,
+    /// TARP natural convection correlations.
+    #[default]
+    Tarp,
+    /// Ceiling diffuser model (Fisher/Pedersen).
+    CeilingDiffuser,
+}
+
+/// Exterior convection model type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExteriorConvectionModel {
+    /// Simple ASHRAE combined coefficients.
+    Simple,
+    /// DOE-2 model with TARP natural + forced.
+    #[default]
+    Doe2,
+    /// MoWiTT wind-direction-dependent model.
+    MoWiTT,
+}
+
+/// Select interior convection coefficient based on model.
+pub fn interior_convection(
+    model: InteriorConvectionModel,
+    delta_t: f64,
+    cos_tilt: f64,
+    surface_height: f64,
+    ach: f64,
+) -> f64 {
+    match model {
+        InteriorConvectionModel::Simple => ashrae_interior_convection(cos_tilt),
+        InteriorConvectionModel::Tarp => tarp_interior_convection(delta_t, cos_tilt, surface_height),
+        InteriorConvectionModel::CeilingDiffuser => ceiling_diffuser_convection(delta_t, cos_tilt, ach),
+    }
+}
+
+/// Select exterior convection coefficient based on model.
+pub fn exterior_convection(
+    model: ExteriorConvectionModel,
+    delta_t: f64,
+    cos_tilt: f64,
+    wind_speed: f64,
+    wind_direction_rad: f64,
+    surface_azimuth_rad: f64,
+    roughness: SurfaceRoughness,
+) -> f64 {
+    match model {
+        ExteriorConvectionModel::Simple => ashrae_exterior_convection(wind_speed, roughness),
+        ExteriorConvectionModel::Doe2 => doe2_exterior_convection(delta_t, cos_tilt, wind_speed, roughness),
+        ExteriorConvectionModel::MoWiTT => {
+            mowitt_exterior_convection(delta_t, cos_tilt, wind_speed, wind_direction_rad, surface_azimuth_rad)
+        }
+    }
+}
+
+// ─── MoWiTT Exterior Convection ─────────────────────────────────────
+
+/// MoWiTT wind-direction-dependent exterior convection model.
+///
+/// h = sqrt(h_natural² + (a * V^b)²)
+/// where a, b depend on windward/leeward orientation.
+///
+/// Reference: Yazdanian, M. and J.H. Klems. 1994.
+pub fn mowitt_exterior_convection(
+    delta_t: f64,
+    cos_tilt: f64,
+    wind_speed: f64,
+    wind_direction_rad: f64,
+    surface_azimuth_rad: f64,
+) -> f64 {
+    let h_natural = tarp_interior_convection(delta_t, cos_tilt, 1.0);
+
+    // Determine if windward or leeward
+    let angle_diff = (wind_direction_rad - surface_azimuth_rad).abs();
+    let is_windward = angle_diff < std::f64::consts::FRAC_PI_2
+        || angle_diff > 3.0 * std::f64::consts::FRAC_PI_2;
+
+    // MoWiTT coefficients (from EnergyPlus)
+    let (a, b) = if is_windward {
+        (3.26, 0.89) // windward
+    } else {
+        (3.55, 0.617) // leeward
+    };
+
+    let h_forced = a * wind_speed.powf(b);
+    (h_natural * h_natural + h_forced * h_forced).sqrt().max(0.1)
+}
+
+/// Simplified combined exterior convection coefficient.
+///
+/// Returns standard ASHRAE values for exposed or sheltered conditions.
+/// Exposed: 17.8 W/(m²·K), Sheltered: 8.3 W/(m²·K).
+pub fn simplified_combined_exterior(is_sheltered: bool) -> f64 {
+    if is_sheltered {
+        8.3
+    } else {
+        17.8
+    }
+}
+
+// ─── Terrain Parameters ─────────────────────────────────────────────
+
+/// Terrain category for wind profile calculations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TerrainCategory {
+    /// Open terrain (flat, open country; airports).
+    Ocean,
+    /// Flat open country.
+    Flat,
+    /// Rough/open with scattered obstructions.
+    #[default]
+    Country,
+    /// Suburban terrain.
+    Suburbs,
+    /// Urban/city center.
+    City,
+}
+
+impl TerrainCategory {
+    /// Power-law exponent for terrain.
+    pub fn exponent(self) -> f64 {
+        match self {
+            Self::Ocean => 0.10,
+            Self::Flat => 0.14,
+            Self::Country => 0.22,
+            Self::Suburbs => 0.22,
+            Self::City => 0.33,
+        }
+    }
+
+    /// Boundary layer thickness (m).
+    pub fn boundary_layer_thickness(self) -> f64 {
+        match self {
+            Self::Ocean => 210.0,
+            Self::Flat => 270.0,
+            Self::Country => 370.0,
+            Self::Suburbs => 370.0,
+            Self::City => 460.0,
+        }
+    }
+
+    /// Get local wind speed for this terrain.
+    pub fn local_wind(&self, met_wind_speed: f64, surface_height: f64) -> f64 {
+        local_wind_speed(
+            met_wind_speed,
+            surface_height,
+            self.exponent(),
+            self.boundary_layer_thickness(),
+        )
+    }
+}
+
 // ─── Exterior Longwave Radiation ─────────────────────────────────────
 
 /// Linearized exterior longwave radiation coefficient.
@@ -363,5 +587,157 @@ mod tests {
             (v_low - v_at_met).abs() < 1e-10,
             "v_low={v_low} should equal v_at_met={v_at_met} (clamped)"
         );
+    }
+
+    // ─── Walton correlations ─────────────────────────────────────────
+
+    #[test]
+    fn walton_unstable_vertical() {
+        let h = walton_unstable_tilted(5.0, 0.0);
+        // For vertical (cos_tilt=0): h = 9.482 * 5^(1/3) / (7.283 - 0)
+        let expected = 9.482 * 5.0_f64.powf(1.0 / 3.0) / 7.283;
+        assert!((h - expected).abs() < 1e-10, "h={h}, expected={expected}");
+    }
+
+    #[test]
+    fn walton_stable_horizontal() {
+        let h = walton_stable_tilted(5.0, 1.0);
+        let expected = 1.810 * 5.0_f64.powf(1.0 / 3.0) / (1.382 + 1.0);
+        assert!((h - expected).abs() < 1e-10, "h={h}, expected={expected}");
+        assert!(h < 2.0, "stable h={h} should be low");
+    }
+
+    #[test]
+    fn walton_unstable_gt_stable() {
+        let h_unstable = walton_unstable_tilted(5.0, 0.5);
+        let h_stable = walton_stable_tilted(5.0, 0.5);
+        assert!(
+            h_unstable > h_stable,
+            "unstable h={h_unstable} should be > stable h={h_stable}"
+        );
+    }
+
+    // ─── Ceiling diffuser ────────────────────────────────────────────
+
+    #[test]
+    fn ceiling_diffuser_wall() {
+        let h = ceiling_diffuser_convection(5.0, 0.0, 6.0);
+        // Wall: sqrt((1.208 * 6^0.467)^2 + (1.31 * 5^(1/3))^2)
+        assert!(h > 2.0 && h < 5.0, "wall h={h}");
+    }
+
+    #[test]
+    fn ceiling_diffuser_floor() {
+        let h = ceiling_diffuser_convection(5.0, 1.0, 6.0);
+        // Floor: 3.873 + 0.082 * 6^0.98
+        assert!(h > 3.5 && h < 5.0, "floor h={h}");
+    }
+
+    #[test]
+    fn ceiling_diffuser_ceiling() {
+        let h = ceiling_diffuser_convection(5.0, -1.0, 6.0);
+        // Ceiling: 0.49 + 0.327 * 6
+        let expected = 0.49 + 0.327 * 6.0;
+        assert!((h - expected).abs() < 1e-10, "ceiling h={h}, expected={expected}");
+    }
+
+    #[test]
+    fn ceiling_diffuser_zero_ach() {
+        // With no air changes, should still have natural convection component
+        let h = ceiling_diffuser_convection(5.0, 0.0, 0.0);
+        assert!(h > 0.0, "h={h} should be > 0 even with zero ACH");
+    }
+
+    // ─── MoWiTT exterior ─────────────────────────────────────────────
+
+    #[test]
+    fn mowitt_windward() {
+        let h = mowitt_exterior_convection(5.0, 0.0, 5.0, 0.0, 0.0);
+        // Windward: sqrt(h_nat² + (3.26 * 5^0.89)²)
+        assert!(h > 10.0, "windward h={h} should be significant");
+    }
+
+    #[test]
+    fn mowitt_leeward() {
+        let h = mowitt_exterior_convection(5.0, 0.0, 5.0, std::f64::consts::PI, 0.0);
+        // Leeward: lower forced convection
+        assert!(h > 5.0, "leeward h={h} should be positive");
+    }
+
+    #[test]
+    fn mowitt_windward_gt_leeward() {
+        let h_ww = mowitt_exterior_convection(5.0, 0.0, 5.0, 0.0, 0.0);
+        let h_lw = mowitt_exterior_convection(5.0, 0.0, 5.0, std::f64::consts::PI, 0.0);
+        assert!(
+            h_ww > h_lw,
+            "windward h={h_ww} should be > leeward h={h_lw}"
+        );
+    }
+
+    #[test]
+    fn mowitt_zero_wind() {
+        let h = mowitt_exterior_convection(5.0, 0.0, 0.0, 0.0, 0.0);
+        let h_nat = tarp_interior_convection(5.0, 0.0, 1.0);
+        // With zero wind, should equal natural convection
+        assert!(
+            (h - h_nat).abs() < 0.1,
+            "h={h} should ≈ h_nat={h_nat} at zero wind"
+        );
+    }
+
+    // ─── Simplified combined ─────────────────────────────────────────
+
+    #[test]
+    fn simplified_combined_values() {
+        assert!((simplified_combined_exterior(false) - 17.8).abs() < 1e-10);
+        assert!((simplified_combined_exterior(true) - 8.3).abs() < 1e-10);
+    }
+
+    // ─── Enhanced model selection ────────────────────────────────────
+
+    #[test]
+    fn interior_model_selection() {
+        let h_simple = interior_convection(InteriorConvectionModel::Simple, 5.0, 0.0, 3.0, 0.0);
+        let h_tarp = interior_convection(InteriorConvectionModel::Tarp, 5.0, 0.0, 3.0, 0.0);
+        let h_cd = interior_convection(InteriorConvectionModel::CeilingDiffuser, 5.0, 0.0, 3.0, 6.0);
+
+        assert!((h_simple - 3.076).abs() < 1e-10);
+        assert!(h_tarp > 0.0 && h_tarp < 10.0);
+        assert!(h_cd > 0.0 && h_cd < 10.0);
+    }
+
+    #[test]
+    fn exterior_model_selection() {
+        let h_simple = exterior_convection(
+            ExteriorConvectionModel::Simple, 5.0, 0.0, 5.0, 0.0, 0.0, SurfaceRoughness::MediumRough,
+        );
+        let h_doe2 = exterior_convection(
+            ExteriorConvectionModel::Doe2, 5.0, 0.0, 5.0, 0.0, 0.0, SurfaceRoughness::MediumRough,
+        );
+        let h_mowitt = exterior_convection(
+            ExteriorConvectionModel::MoWiTT, 5.0, 0.0, 5.0, 0.0, 0.0, SurfaceRoughness::MediumRough,
+        );
+
+        assert!(h_simple > 0.0);
+        assert!(h_doe2 > 0.0);
+        assert!(h_mowitt > 0.0);
+    }
+
+    // ─── Terrain ─────────────────────────────────────────────────────
+
+    #[test]
+    fn terrain_local_wind() {
+        let v_city = TerrainCategory::City.local_wind(5.0, 15.0);
+        let v_flat = TerrainCategory::Flat.local_wind(5.0, 15.0);
+        assert!(
+            v_flat > v_city,
+            "flat v={v_flat} should be > city v={v_city}"
+        );
+    }
+
+    #[test]
+    fn terrain_parameters() {
+        assert!(TerrainCategory::City.exponent() > TerrainCategory::Flat.exponent());
+        assert!(TerrainCategory::City.boundary_layer_thickness() > TerrainCategory::Flat.boundary_layer_thickness());
     }
 }

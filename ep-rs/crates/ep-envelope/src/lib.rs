@@ -7,3 +7,4 @@
 pub mod convection;
 pub mod ctf;
 pub mod heat_balance;
+pub mod radiant_exchange;
