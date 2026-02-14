@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 pub mod idf;
+pub mod macro_proc;
+pub mod schema;
 pub mod validation;
 
 /// Parsed input model containing all objects from an IDF or epJSON file.
@@ -20,6 +22,12 @@ impl InputModel {
     pub fn from_idf(path: &Path) -> Result<Self, InputError> {
         let content = std::fs::read_to_string(path).map_err(|e| InputError::IoError(e.to_string()))?;
         idf::parse_idf_string(&content)
+    }
+
+    /// Parse from an IDF file with schema-aware field naming.
+    pub fn from_idf_with_schema(path: &Path, schema: &schema::SchemaDb) -> Result<Self, InputError> {
+        let content = std::fs::read_to_string(path).map_err(|e| InputError::IoError(e.to_string()))?;
+        idf::parse_idf_with_schema(&content, schema)
     }
 
     /// Parse from an epJSON file.
@@ -53,6 +61,11 @@ impl InputModel {
         self.objects.get(&object_type.to_uppercase()).map_or(&[], |v| v.as_slice())
     }
 
+    /// Get mutable access to all objects of a given type (case-insensitive).
+    pub fn get_objects_mut(&mut self, object_type: &str) -> &mut Vec<serde_json::Value> {
+        self.objects.entry(object_type.to_uppercase()).or_default()
+    }
+
     /// Get the number of objects of a given type.
     pub fn object_count(&self, object_type: &str) -> usize {
         self.objects.get(&object_type.to_uppercase()).map_or(0, |v| v.len())
@@ -71,6 +84,38 @@ impl InputModel {
     /// Insert an object into the model.
     pub fn add_object(&mut self, object_type: &str, object: serde_json::Value) {
         self.objects.entry(object_type.to_uppercase()).or_default().push(object);
+    }
+}
+
+/// Inject default values from the schema into a model.
+///
+/// For each object in the model, if a field is missing and the schema
+/// provides a default value, the default is inserted.
+pub fn inject_defaults(model: &mut InputModel, schema: &schema::SchemaDb) {
+    let obj_types: Vec<String> = model.object_types().iter().map(|s| s.to_string()).collect();
+    for obj_type in &obj_types {
+        if let Some(def) = schema.get(obj_type) {
+            let objects = model.get_objects_mut(obj_type);
+            for obj in objects.iter_mut() {
+                if let Some(map) = obj.as_object_mut() {
+                    for (i, field_def) in def.fields.iter().enumerate() {
+                        let field_key = if i == 0 {
+                            "name".to_string()
+                        } else {
+                            format!("field_{i}")
+                        };
+                        if !map.contains_key(&field_key) && !map.contains_key(&field_def.name) {
+                            if let Some(default) = &field_def.default_value {
+                                map.insert(
+                                    field_def.name.clone(),
+                                    serde_json::Value::String(default.clone()),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -174,5 +219,51 @@ mod tests {
 
         assert_eq!(model.object_count("Building"), 1);
         assert_eq!(model.object_count("Zone"), 2);
+    }
+
+    #[test]
+    fn get_objects_mut_creates_entry() {
+        let mut model = InputModel::default();
+        let objs = model.get_objects_mut("Zone");
+        assert!(objs.is_empty());
+        objs.push(serde_json::json!({"name": "Z1"}));
+        assert_eq!(model.object_count("Zone"), 1);
+    }
+
+    #[test]
+    fn inject_defaults_fills_missing() {
+        let schema = schema::SchemaDb::minimal();
+        let mut model = InputModel::default();
+        model.add_object("Building", serde_json::json!({"name": "TestBldg"}));
+        inject_defaults(&mut model, &schema);
+
+        let bldgs = model.get_objects("Building");
+        let b = &bldgs[0];
+        // North Axis should have been injected as "0"
+        assert_eq!(
+            b.get("North Axis").and_then(|v| v.as_str()),
+            Some("0")
+        );
+        // Terrain should have been injected as "Suburbs"
+        assert_eq!(
+            b.get("Terrain").and_then(|v| v.as_str()),
+            Some("Suburbs")
+        );
+    }
+
+    #[test]
+    fn inject_defaults_does_not_overwrite() {
+        let schema = schema::SchemaDb::minimal();
+        let mut model = InputModel::default();
+        model.add_object(
+            "Building",
+            serde_json::json!({"name": "TestBldg", "Terrain": "City"}),
+        );
+        inject_defaults(&mut model, &schema);
+
+        let bldgs = model.get_objects("Building");
+        let b = &bldgs[0];
+        // Should keep the user-specified value
+        assert_eq!(b.get("Terrain").and_then(|v| v.as_str()), Some("City"));
     }
 }

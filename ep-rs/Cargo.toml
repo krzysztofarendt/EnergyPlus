@@ -33,6 +33,7 @@ members = [
     "crates/ep-refrigeration",
     "crates/ep-water",
     "crates/ep-api",
+    "crates/ep-output",
     "tools/idf-convert",
     "tools/ep-diff",
 ]
@@ -80,6 +81,7 @@ ep-validation = { path = "crates/ep-validation" }
 ep-refrigeration = { path = "crates/ep-refrigeration" }
 ep-water = { path = "crates/ep-water" }
 ep-api = { path = "crates/ep-api" }
+ep-output = { path = "crates/ep-output" }
 
 [profile.release]
 lto = "thin"

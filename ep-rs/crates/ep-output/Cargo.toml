@@ -1,0 +1,12 @@
+[package]
+name = "ep-output"
+version = "0.1.0"
+edition = "2021"
+description = "Output reporting (ESO/MTR/CSV/SQL/tabular) and meter system for EnergyPlus-rs"
+
+[dependencies]
+ep-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }

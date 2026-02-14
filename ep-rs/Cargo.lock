@@ -245,6 +245,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ep-output"
+version = "0.1.0"
+dependencies = [
+ "ep-core",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "ep-plant"
 version = "0.1.0"
 dependencies = [
