@@ -55,6 +55,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ep-api"
+version = "0.1.0"
+dependencies = [
+ "ep-core",
+ "ep-sim",
+]
+
+[[package]]
 name = "ep-coils"
 version = "0.1.0"
 dependencies = [
@@ -258,6 +266,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ep-refrigeration"
+version = "0.1.0"
+dependencies = [
+ "ep-core",
+ "ep-curves",
+ "ep-psychrometrics",
+]
+
+[[package]]
 name = "ep-schedule"
 version = "0.1.0"
 dependencies = [
@@ -305,6 +322,15 @@ version = "0.1.0"
 dependencies = [
  "ep-core",
  "ep-psychrometrics",
+]
+
+[[package]]
+name = "ep-water"
+version = "0.1.0"
+dependencies = [
+ "ep-core",
+ "ep-curves",
+ "ep-units",
 ]
 
 [[package]]

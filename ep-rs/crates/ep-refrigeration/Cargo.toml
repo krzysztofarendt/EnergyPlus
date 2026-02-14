@@ -1,0 +1,9 @@
+[package]
+name = "ep-refrigeration"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ep-core = { workspace = true }
+ep-curves = { workspace = true }
+ep-psychrometrics = { workspace = true }

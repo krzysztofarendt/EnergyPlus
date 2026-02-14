@@ -30,6 +30,9 @@ members = [
     "crates/ep-demand",
     "crates/ep-sim",
     "crates/ep-validation",
+    "crates/ep-refrigeration",
+    "crates/ep-water",
+    "crates/ep-api",
     "tools/idf-convert",
     "tools/ep-diff",
 ]
@@ -74,6 +77,9 @@ ep-generation = { path = "crates/ep-generation" }
 ep-demand = { path = "crates/ep-demand" }
 ep-sim = { path = "crates/ep-sim" }
 ep-validation = { path = "crates/ep-validation" }
+ep-refrigeration = { path = "crates/ep-refrigeration" }
+ep-water = { path = "crates/ep-water" }
+ep-api = { path = "crates/ep-api" }
 
 [profile.release]
 lto = "thin"

@@ -1,0 +1,9 @@
+[package]
+name = "ep-water"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ep-core = { workspace = true }
+ep-curves = { workspace = true }
+ep-units = { workspace = true }
