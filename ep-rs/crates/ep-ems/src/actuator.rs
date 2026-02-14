@@ -89,4 +89,33 @@ mod tests {
         assert!(!act.is_active);
         assert!(act.overridden_value().is_none());
     }
+
+    #[test]
+    fn actuator_activate_deactivate_cycle() {
+        let mut act = Actuator::new("CycleAct", "Coil", "Heating Rate");
+
+        // Initially inactive
+        assert!(!act.is_active);
+        assert!(matches!(act.state, ActuatorState::Normal));
+
+        // Activate with 100.0
+        act.activate(100.0);
+        assert!(act.is_active);
+        assert!((act.overridden_value().unwrap() - 100.0).abs() < 1e-10);
+
+        // Deactivate
+        act.deactivate();
+        assert!(!act.is_active);
+        assert!(act.overridden_value().is_none());
+
+        // Re-activate with a different value
+        act.activate(200.0);
+        assert!(act.is_active);
+        assert!((act.overridden_value().unwrap() - 200.0).abs() < 1e-10);
+
+        // Deactivate again
+        act.deactivate();
+        assert!(!act.is_active);
+        assert!(matches!(act.state, ActuatorState::Normal));
+    }
 }

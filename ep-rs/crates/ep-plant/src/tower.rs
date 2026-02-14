@@ -241,4 +241,67 @@ mod tests {
         assert!((result_low.fan_power - 15000.0 * 0.125).abs() < 1.0,
                 "P_low={}", result_low.fan_power);
     }
+
+    #[test]
+    fn tower_water_temp_near_wetbulb() {
+        // When inlet water temp is close to wetbulb, approach is small
+        // and heat rejection should be small
+        let t = CoolingTower::new("CT-Small", 50.0, 30.0, 15000.0);
+        let wb = 25.0;
+        // Inlet only 1.5 C above wetbulb + min_approach (1.0 C)
+        // min_outlet = wb + 1.0 = 26.0, inlet = 27.5
+        // q_max = mdot * cp * (27.5 - 26.0) = 50 * 4180 * 1.5 = 313500
+        let result = t.calculate(27.5, 50.0, wb, 100_000.0);
+
+        // Heat rejection should be positive but limited
+        assert!(result.heat_rejection_rate > 0.0, "Q={}", result.heat_rejection_rate);
+        // Approach should be small and positive
+        assert!(result.approach > 0.0, "approach={}", result.approach);
+        assert!(result.approach < 5.0, "approach too big={}", result.approach);
+    }
+
+    #[test]
+    fn tower_energy_balance() {
+        // Verify outlet = inlet - q/(mdot*cp)
+        let t = CoolingTower::new("CT-Balance", 50.0, 30.0, 15000.0);
+        let inlet_temp = 35.0;
+        let mdot = 50.0;
+        let wb = 25.0;
+        let load = 300_000.0;
+
+        let result = t.calculate(inlet_temp, mdot, wb, load);
+
+        let cp = ep_psychrometrics::cp_water(inlet_temp);
+        let expected_outlet = inlet_temp - result.heat_rejection_rate / (mdot * cp);
+
+        assert!(
+            (result.outlet_water_temp - expected_outlet).abs() < 0.01,
+            "T_out={}, expected={}",
+            result.outlet_water_temp,
+            expected_outlet
+        );
+    }
+
+    #[test]
+    fn tower_variable_speed_min_airflow() {
+        let mut t = CoolingTower::variable_speed("CT-VS-Min", 50.0, 30.0, 15000.0);
+        t.min_air_flow_ratio = 0.3;
+
+        // Very small load → air_flow_ratio should be clamped to min_air_flow_ratio
+        let result = t.calculate(35.0, 50.0, 25.0, 1.0);
+
+        assert!(
+            result.air_flow_ratio >= 0.3 - 1e-10,
+            "air_flow_ratio={}, expected >= 0.3",
+            result.air_flow_ratio
+        );
+        // Fan power at min ratio: design_power * 0.3^3 = 15000 * 0.027 = 405
+        let expected_power = 15000.0 * 0.3_f64.powi(3);
+        assert!(
+            (result.fan_power - expected_power).abs() < 1.0,
+            "fan_power={}, expected={}",
+            result.fan_power,
+            expected_power
+        );
+    }
 }

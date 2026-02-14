@@ -285,4 +285,129 @@ mod tests {
         PlantLoop::distribute_branch_flows(&mut branches, 0.0);
         assert!(branches[0].current_flow.abs() < 1e-10);
     }
+
+    #[test]
+    fn flow_lock_state_transitions() {
+        let mut hl = HalfLoop::new(LoopSideId::Supply, 0, 1);
+        assert_eq!(hl.flow_lock, FlowLockState::PumpQuery);
+
+        hl.flow_lock = FlowLockState::Unlocked;
+        assert_eq!(hl.flow_lock, FlowLockState::Unlocked);
+
+        hl.flow_lock = FlowLockState::Locked;
+        assert_eq!(hl.flow_lock, FlowLockState::Locked);
+    }
+
+    #[test]
+    fn plant_loop_convergence_flag() {
+        let mut loop_ = PlantLoop::new("Conv Test", 0, 1, 2, 3);
+
+        // Neither converged
+        assert!(!loop_.converged());
+
+        // Only flow converged
+        loop_.flow_converged = true;
+        loop_.temp_converged = false;
+        assert!(!loop_.converged());
+
+        // Only temp converged
+        loop_.flow_converged = false;
+        loop_.temp_converged = true;
+        assert!(!loop_.converged());
+
+        // Both converged
+        loop_.flow_converged = true;
+        loop_.temp_converged = true;
+        assert!(loop_.converged());
+    }
+
+    #[test]
+    fn distribute_flows_equal_no_requests() {
+        // All branches have zero requested_flow but total_flow > 0 → equal distribution
+        let mut branches = vec![
+            PlantBranch::new("B1", 0, 1),
+            PlantBranch::new("B2", 2, 3),
+            PlantBranch::new("B3", 4, 5),
+        ];
+        // requested_flow defaults to 0.0 from PlantBranch::new
+
+        PlantLoop::distribute_branch_flows(&mut branches, 3.0);
+
+        for (i, branch) in branches.iter().enumerate() {
+            assert!(
+                (branch.current_flow - 1.0).abs() < 1e-10,
+                "branch {} flow={}, expected 1.0",
+                i,
+                branch.current_flow
+            );
+        }
+    }
+
+    #[test]
+    fn distribute_flows_single_branch() {
+        let mut branches = vec![PlantBranch::new("Only", 0, 1)];
+        branches[0].requested_flow = 2.0;
+
+        PlantLoop::distribute_branch_flows(&mut branches, 2.0);
+        assert!(
+            (branches[0].current_flow - 2.0).abs() < 1e-10,
+            "flow={}",
+            branches[0].current_flow
+        );
+    }
+
+    #[test]
+    fn plant_branch_with_components() {
+        let mut branch = PlantBranch::new("Boiler Branch", 10, 20);
+        assert!(branch.components.is_empty());
+
+        branch.components.push(PlantBranchComponent {
+            name: "Boiler-1".to_string(),
+            component_type: "Boiler:HotWater".to_string(),
+            inlet_node: 10,
+            outlet_node: 11,
+            is_on: true,
+            my_load: 50_000.0,
+        });
+        branch.components.push(PlantBranchComponent {
+            name: "Pipe-1".to_string(),
+            component_type: "Pipe:Adiabatic".to_string(),
+            inlet_node: 11,
+            outlet_node: 20,
+            is_on: true,
+            my_load: 0.0,
+        });
+
+        assert_eq!(branch.components.len(), 2);
+        assert_eq!(branch.components[0].name, "Boiler-1");
+        assert_eq!(branch.components[1].component_type, "Pipe:Adiabatic");
+        assert!(branch.components[0].is_on);
+        assert!((branch.components[0].my_load - 50_000.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn plant_splitter_construction() {
+        let splitter = PlantSplitter {
+            name: "Supply Splitter".to_string(),
+            inlet_node: 5,
+            outlet_branches: vec![0, 1, 2],
+        };
+        assert_eq!(splitter.name, "Supply Splitter");
+        assert_eq!(splitter.inlet_node, 5);
+        assert_eq!(splitter.outlet_branches.len(), 3);
+        assert_eq!(splitter.outlet_branches[1], 1);
+    }
+
+    #[test]
+    fn plant_mixer_construction() {
+        let mixer = PlantMixer {
+            name: "Supply Mixer".to_string(),
+            outlet_node: 10,
+            inlet_branches: vec![0, 1],
+        };
+        assert_eq!(mixer.name, "Supply Mixer");
+        assert_eq!(mixer.outlet_node, 10);
+        assert_eq!(mixer.inlet_branches.len(), 2);
+        assert_eq!(mixer.inlet_branches[0], 0);
+    }
 }

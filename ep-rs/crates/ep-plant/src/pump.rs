@@ -252,4 +252,33 @@ mod tests {
         assert!((result.delta_temp - expected_dt).abs() < 0.001,
                 "dt={}, expected={}", result.delta_temp, expected_dt);
     }
+
+    #[test]
+    fn variable_speed_plr_clamped() {
+        let p = Pump::variable_speed("VSD-Clamp", 0.01, 200_000.0, 0.9, 0.1);
+        // design_mass_flow = 0.01 * 1000 = 10 kg/s
+        // Provide flow > design → PLR should be clamped to 1.0
+        let result = p.calculate(15.0, 1000.0, 7.0);
+
+        assert!(
+            (result.part_load_ratio - 1.0).abs() < 0.01,
+            "PLR={}, expected 1.0 (clamped)",
+            result.part_load_ratio
+        );
+    }
+
+    #[test]
+    fn pump_zero_motor_efficiency() {
+        // Motor efficiency = 0 → rated_power = 0 → power = 0 (graceful)
+        let p = Pump::constant_speed("Zero-Eff", 0.01, 200_000.0, 0.0);
+        assert!(p.rated_power.abs() < 1e-10, "rated_power={}", p.rated_power);
+
+        let result = p.calculate(10.0, 1000.0, 7.0);
+        assert!(result.power.abs() < 1e-10, "power={}", result.power);
+        assert!(
+            result.heat_to_fluid.abs() < 1e-10,
+            "heat={}",
+            result.heat_to_fluid
+        );
+    }
 }

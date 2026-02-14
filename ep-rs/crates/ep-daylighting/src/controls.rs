@@ -232,4 +232,44 @@ mod tests {
         let reduction = zone_power_reduction(&[1.0], &[0.0]);
         assert!((reduction).abs() < 1e-10);
     }
+
+    #[test]
+    fn continuous_zero_setpoint() {
+        // setpoint = 0 means no dimming possible, power should be 1.0
+        let ctrl = DaylightControl::default();
+        let pf = ctrl.power_fraction(500.0, 0.0);
+        assert!((pf - 1.0).abs() < 1e-10, "pf={pf}");
+
+        // Even with zero daylight, zero setpoint returns 1.0
+        let pf2 = ctrl.power_fraction(0.0, 0.0);
+        assert!((pf2 - 1.0).abs() < 1e-10, "pf2={pf2}");
+    }
+
+    #[test]
+    fn stepped_zero_steps() {
+        // num_steps = 0 should return 1.0 (full power, no stepping possible)
+        let ctrl = DaylightControl {
+            control_type: LightingControlType::Stepped,
+            num_steps: 0,
+            ..Default::default()
+        };
+        let pf = ctrl.power_fraction(250.0, 500.0);
+        assert!((pf - 1.0).abs() < 1e-10, "pf={pf}");
+
+        // Even with full daylight
+        let pf2 = ctrl.power_fraction(500.0, 500.0);
+        assert!((pf2 - 1.0).abs() < 1e-10, "pf2={pf2}");
+    }
+
+    #[test]
+    fn zone_power_reduction_excess_fraction() {
+        // Fractions that sum to more than 1.0
+        // ref points: 0.6 + 0.6 = 1.2 > 1.0
+        // total = 0.6*0.5 + 0.6*0.3 + max(0, 1.0-1.2)*1.0
+        //       = 0.30 + 0.18 + 0.0 = 0.48
+        let reduction = zone_power_reduction(&[0.6, 0.6], &[0.5, 0.3]);
+        assert!(reduction >= 0.0 && reduction <= 1.0,
+            "reduction={reduction} should be in [0,1]");
+        assert!((reduction - 0.48).abs() < 1e-10, "reduction={reduction}");
+    }
 }

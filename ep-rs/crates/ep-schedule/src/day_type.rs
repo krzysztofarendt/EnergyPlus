@@ -96,4 +96,37 @@ mod tests {
         assert_eq!(parse_day_type("SummerDesignDay"), Some(DayType::SummerDesignDay));
         assert_eq!(parse_day_type("invalid"), None);
     }
+
+    #[test]
+    fn day_type_weekday_match() {
+        // Weekdays should match Tue, Wed, Thu, Fri (and Monday)
+        assert!(DayType::Weekdays.matches(DayType::Tuesday));
+        assert!(DayType::Weekdays.matches(DayType::Wednesday));
+        assert!(DayType::Weekdays.matches(DayType::Thursday));
+        assert!(DayType::Weekdays.matches(DayType::Friday));
+    }
+
+    #[test]
+    fn day_type_weekday_no_match_saturday() {
+        assert!(!DayType::Weekdays.matches(DayType::Saturday));
+    }
+
+    #[test]
+    fn day_type_exact_match() {
+        assert!(DayType::Monday.matches(DayType::Monday));
+        assert!(!DayType::Monday.matches(DayType::Tuesday));
+        assert!(!DayType::Monday.matches(DayType::Sunday));
+    }
+
+    #[test]
+    fn day_type_from_weekday_all() {
+        use ep_core::time::Weekday;
+        assert_eq!(day_type_from_weekday(Weekday::Sunday), DayType::Sunday);
+        assert_eq!(day_type_from_weekday(Weekday::Monday), DayType::Monday);
+        assert_eq!(day_type_from_weekday(Weekday::Tuesday), DayType::Tuesday);
+        assert_eq!(day_type_from_weekday(Weekday::Wednesday), DayType::Wednesday);
+        assert_eq!(day_type_from_weekday(Weekday::Thursday), DayType::Thursday);
+        assert_eq!(day_type_from_weekday(Weekday::Friday), DayType::Friday);
+        assert_eq!(day_type_from_weekday(Weekday::Saturday), DayType::Saturday);
+    }
 }

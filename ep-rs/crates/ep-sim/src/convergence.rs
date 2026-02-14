@@ -229,4 +229,68 @@ mod tests {
 
         assert!(!monitor.all_converged());
     }
+
+    #[test]
+    fn tracker_diverging() {
+        let mut tracker = ConvergenceTracker::new(0.1);
+        // Record values where the absolute change is increasing by >10%
+        tracker.record(10.0);
+        tracker.record(12.0);  // change = 2.0
+        tracker.record(15.0);  // change = 3.0, which is > 2.0 * 1.1 = 2.2
+        assert_eq!(tracker.status(), ConvergenceStatus::Diverging);
+    }
+
+    #[test]
+    fn tracker_max_history_overflow() {
+        let mut tracker = ConvergenceTracker::new(0.1);
+        // Default max_history is 30; push 35 values
+        for i in 0..35 {
+            tracker.record(i as f64);
+        }
+        assert_eq!(tracker.iteration_count(), 30);
+        // The oldest values should have been removed; first value should be 5.0
+        assert!((tracker.history[0] - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn tracker_current_value() {
+        let mut tracker = ConvergenceTracker::new(0.1);
+        assert!(tracker.current().is_none());
+        tracker.record(42.0);
+        assert!((tracker.current().unwrap() - 42.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn zone_monitor_max_residual() {
+        let mut monitor = ZoneConvergenceMonitor::new(2, 0.01, 0.01);
+        // Zone 0: load changes by 50.0
+        monitor.record_zone(0, 22.0, 100.0);
+        monitor.record_zone(0, 22.0, 150.0);
+        // Zone 1: load changes by 200.0
+        monitor.record_zone(1, 24.0, 100.0);
+        monitor.record_zone(1, 24.0, 300.0);
+
+        let max_r = monitor.max_residual();
+        assert!((max_r - 200.0).abs() < 1e-10,
+                "max_residual should be 200.0 but was {}", max_r);
+    }
+
+    #[test]
+    fn zone_monitor_reset() {
+        let mut monitor = ZoneConvergenceMonitor::new(2, 0.01, 0.01);
+        monitor.record_zone(0, 22.0, 100.0);
+        monitor.record_zone(0, 22.5, 110.0);
+        monitor.record_zone(1, 24.0, 200.0);
+        monitor.record_zone(1, 24.5, 210.0);
+
+        assert_eq!(monitor.zone_temps[0].iteration_count(), 2);
+        assert_eq!(monitor.zone_loads[1].iteration_count(), 2);
+
+        monitor.reset();
+
+        assert_eq!(monitor.zone_temps[0].iteration_count(), 0);
+        assert_eq!(monitor.zone_temps[1].iteration_count(), 0);
+        assert_eq!(monitor.zone_loads[0].iteration_count(), 0);
+        assert_eq!(monitor.zone_loads[1].iteration_count(), 0);
+    }
 }

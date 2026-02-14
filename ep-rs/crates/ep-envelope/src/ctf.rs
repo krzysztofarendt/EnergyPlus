@@ -501,4 +501,129 @@ mod tests {
         assert!((x[1] - 0.5).abs() < 1e-10);
         assert!((x[2] - 0.0).abs() < 1e-10);
     }
+
+    // ─── New CTF tests ───────────────────────────────────────────────
+
+    #[test]
+    fn ctf_empty_construction() {
+        // Construction with no layers → should return None
+        let db = MaterialDatabase::new();
+        let constr = Construction::new("Empty");
+        let result = generate_ctf(&constr, &db, 3600.0);
+        assert!(result.is_none(), "Empty construction should return None");
+    }
+
+    #[test]
+    fn ctf_air_gap_layer() {
+        // Single air gap layer → massless → steady-state CTF, U = 1/R
+        let mut db = MaterialDatabase::new();
+        let gap_idx = db.add_material(Material::AirGap(AirGapMaterial {
+            name: "AirGap".into(),
+            resistance: 0.18, // typical air gap R-value (m2-K/W)
+        }));
+        let mut constr = Construction::new("AirGapOnly");
+        constr.layers = vec![gap_idx];
+
+        let ctf = generate_ctf(&constr, &db, 3600.0);
+        assert!(ctf.is_some(), "Air gap construction should produce CTF");
+        let ctf = ctf.unwrap();
+
+        // Steady-state: num_terms = 0
+        assert_eq!(ctf.num_terms, 0, "Air gap should be steady-state");
+
+        // U = 1/R = 1/0.18 ≈ 5.556
+        let u_expected = 1.0 / 0.18;
+        assert!(
+            (ctf.outside[0] - u_expected).abs() < 1e-10,
+            "X[0]={}, expected U={}",
+            ctf.outside[0],
+            u_expected
+        );
+        assert!(
+            (ctf.cross[0] + u_expected).abs() < 1e-10,
+            "Y[0]={}, expected -U={}",
+            ctf.cross[0],
+            -u_expected
+        );
+        assert!(
+            (ctf.inside[0] - u_expected).abs() < 1e-10,
+            "Z[0]={}, expected U={}",
+            ctf.inside[0],
+            u_expected
+        );
+    }
+
+    #[test]
+    fn ctf_two_layer_u_value() {
+        // Brick + insulation wall, verify cross-coupling sum ≈ -U
+        let mut db = MaterialDatabase::new();
+        let brick_idx = db.add_material(Material::Opaque(OpaqueMaterial {
+            name: "Brick".into(),
+            thickness: Length::new(0.1),
+            conductivity: 0.89,
+            density: 1920.0,
+            specific_heat: 790.0,
+            ..Default::default()
+        }));
+        let insul_idx = db.add_material(Material::Opaque(OpaqueMaterial {
+            name: "Insulation".into(),
+            thickness: Length::new(0.05),
+            conductivity: 0.04,
+            density: 32.0,
+            specific_heat: 830.0,
+            ..Default::default()
+        }));
+        let mut constr = Construction::new("BrickInsul");
+        constr.layers = vec![brick_idx, insul_idx];
+
+        let ctf = generate_ctf(&constr, &db, 3600.0).unwrap();
+
+        // The sum of Y (cross) coefficients should be negative (heat cross-coupling)
+        let y_sum: f64 = ctf.cross.iter().sum();
+        assert!(
+            y_sum < 0.0,
+            "Y sum={y_sum} should be negative"
+        );
+        // The magnitude should be on the same order as U = k/L_total
+        let r_total = 0.1 / 0.89 + 0.05 / 0.04;
+        let u_expected = 1.0 / r_total;
+        // The FD response factor method may overshoot U somewhat, but magnitude
+        // should be within a factor of 3
+        assert!(
+            y_sum.abs() > u_expected * 0.3 && y_sum.abs() < u_expected * 3.0,
+            "Y sum magnitude={} should be on same order as U={}",
+            y_sum.abs(),
+            u_expected
+        );
+    }
+
+    #[test]
+    fn ctf_heavy_wall_more_terms() {
+        // 200mm concrete → high thermal mass → should need more than 1 CTF term
+        let mut db = MaterialDatabase::new();
+        let concrete_idx = db.add_material(Material::Opaque(OpaqueMaterial {
+            name: "HeavyConcrete".into(),
+            thickness: Length::new(0.2),
+            conductivity: 1.4,
+            density: 2300.0,
+            specific_heat: 880.0,
+            ..Default::default()
+        }));
+        let mut constr = Construction::new("HeavyWall");
+        constr.layers = vec![concrete_idx];
+
+        let ctf = generate_ctf(&constr, &db, 3600.0).unwrap();
+
+        assert!(
+            ctf.num_terms > 1,
+            "Heavy wall should need > 1 CTF term, got {}",
+            ctf.num_terms
+        );
+        // Should also have multiple outside coefficients
+        assert!(
+            ctf.outside.len() > 2,
+            "Heavy wall should have > 2 outside coefficients, got {}",
+            ctf.outside.len()
+        );
+    }
 }

@@ -287,4 +287,74 @@ mod tests {
         // COP = 500000/100000 = 5.0
         assert!((result.cop - 5.0).abs() < 0.1, "COP={}", result.cop);
     }
+
+    #[test]
+    fn chiller_no_flow() {
+        let ch = Chiller::new("Test", 500_000.0, 5.0, 20.0, 25.0);
+        let (cap_ft, eir_ft, eir_fplr) = flat_curves();
+
+        // Zero evaporator flow → early return, zero cooling and power
+        let result = ch.calculate(
+            12.0, 0.0, 30.0, 25.0, 500_000.0,
+            &cap_ft, &eir_ft, &eir_fplr,
+        );
+
+        assert!(result.evap_cooling_rate.abs() < 1e-10, "Q={}", result.evap_cooling_rate);
+        assert!(result.power.abs() < 1e-10, "P={}", result.power);
+        assert!(
+            (result.evap_outlet_temp - 12.0).abs() < 1e-10,
+            "T_evap_out={}",
+            result.evap_outlet_temp
+        );
+    }
+
+    #[test]
+    fn chiller_realistic_curves() {
+        let ch = Chiller::new("Realistic", 500_000.0, 5.0, 20.0, 25.0);
+
+        // Non-flat biquadratic for capacity: decreases with higher condenser temp
+        // CapFTemp = 1.0 + 0.0 * T_evap + 0.0 * T_evap^2 - 0.005 * T_cond + 0.0 * T_cond^2 + 0.0 * T_evap*T_cond
+        let cap_ft = Curve::biquadratic(1.0, 0.0, 0.0, -0.005, 0.0, 0.0);
+        // EIRFTemp: increases with condenser temp
+        let eir_ft = Curve::biquadratic(0.8, 0.0, 0.0, 0.007, 0.0, 0.0);
+        let eir_fplr = Curve::linear(0.0, 1.0);
+
+        // Case 1: reference condenser entering = 29.44 C
+        let result_ref = ch.calculate(
+            12.0, 20.0, 29.44, 25.0, 400_000.0,
+            &cap_ft, &eir_ft, &eir_fplr,
+        );
+
+        // Case 2: higher condenser temp = 40.0 C
+        let result_hot = ch.calculate(
+            12.0, 20.0, 40.0, 25.0, 400_000.0,
+            &cap_ft, &eir_ft, &eir_fplr,
+        );
+
+        // At higher condenser temp, capacity decreases and EIR increases → COP drops
+        assert!(
+            result_hot.cop < result_ref.cop,
+            "COP_hot={} should be less than COP_ref={}",
+            result_hot.cop,
+            result_ref.cop
+        );
+    }
+
+    #[test]
+    fn chiller_condenser_no_flow() {
+        let ch = Chiller::new("Test", 500_000.0, 5.0, 20.0, 25.0);
+        let (cap_ft, eir_ft, eir_fplr) = flat_curves();
+
+        // Zero condenser flow → condenser outlet = condenser inlet
+        let result = ch.calculate(
+            12.0, 20.0, 30.0, 0.0, 500_000.0,
+            &cap_ft, &eir_ft, &eir_fplr,
+        );
+
+        assert!(
+            (result.cond_outlet_temp - 30.0).abs() < 1e-10,
+            "T_cond_out={}, expected 30.0",
+            result.cond_outlet_temp
+        );
+    }
 }

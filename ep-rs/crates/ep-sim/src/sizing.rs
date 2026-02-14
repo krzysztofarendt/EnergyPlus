@@ -311,4 +311,47 @@ mod tests {
         assert!((cooling.design_delta_t - 5.0).abs() < 0.1);
         assert!((cooling.design_exit_temp - 7.0).abs() < 0.1);
     }
+
+    #[test]
+    fn zone_sizing_heating_peak() {
+        let mut zs = ZoneSizingData::new("Zone1");
+        zs.update_heating(3000.0, 0.3, -5.0, 1, 15, 8);
+        zs.update_heating(5000.0, 0.5, -10.0, 1, 21, 7);
+        zs.update_heating(4000.0, 0.4, -8.0, 1, 21, 9);
+
+        // Only the peak (5000 W) should be retained
+        assert!((zs.design_heat_load - 5000.0).abs() < 1.0);
+        assert!((zs.design_heat_airflow - 0.5).abs() < 0.01);
+        assert!((zs.heat_outdoor_temp - (-10.0)).abs() < 0.1);
+        assert_eq!(zs.heat_peak_hour, 7);
+        assert_eq!(zs.heat_peak_day, 21);
+        assert_eq!(zs.heat_peak_month, 1);
+    }
+
+    #[test]
+    fn system_sizing_factor() {
+        let mut z1 = ZoneSizingData::new("Z1");
+        z1.design_cool_load = 10000.0;
+        z1.design_heat_load = 8000.0;
+        z1.design_cool_airflow = 1.0;
+        z1.design_heat_airflow = 0.8;
+
+        let mut sys = SystemSizingData::new("AHU-1");
+        sys.sizing_factor = 1.1;
+        sys.size_from_zones(&[z1]);
+
+        // final_cool_capacity = design_cool_capacity * sizing_factor = 10000 * 1.1 = 11000
+        assert!((sys.final_cool_capacity() - 11000.0).abs() < 1.0);
+        assert!((sys.final_heat_capacity() - 8800.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn plant_sizing_zero_delta_t() {
+        let mut ps = PlantSizingData::new("CW Loop", PlantLoopType::Cooling);
+        ps.design_delta_t = 0.0;
+        ps.calculate_flow_from_capacity(100_000.0);
+
+        // delta_t < 0.1, so flow should remain 0
+        assert!((ps.design_flow_rate - 0.0).abs() < 1e-10);
+    }
 }

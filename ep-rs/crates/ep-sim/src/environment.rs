@@ -171,4 +171,23 @@ mod tests {
         queue.reset();
         assert_eq!(queue.remaining(), 1);
     }
+
+    #[test]
+    fn run_period_environment() {
+        let env = Environment::run_period("April", 4, 1, 4, 30, 30);
+        assert_eq!(env.env_type, EnvironmentType::WeatherRunPeriod);
+        assert_eq!(env.total_days, 30);
+        assert_eq!(env.start_month, 4);
+        assert_eq!(env.start_day, 1);
+        assert_eq!(env.end_month, 4);
+        assert_eq!(env.end_day, 30);
+        assert!(!env.is_sizing);
+    }
+
+    #[test]
+    fn environment_queue_empty() {
+        let mut queue = EnvironmentQueue::new();
+        assert!(queue.next().is_none());
+        assert_eq!(queue.remaining(), 0);
+    }
 }

@@ -236,4 +236,71 @@ mod tests {
         let e = horizontal_sky_illuminance(SkyType::Clear, -0.1, 0.0, 18, 8);
         assert!((e).abs() < 1e-10);
     }
+
+    #[test]
+    fn intermediate_sky_luminance() {
+        let sun_alt = PI / 4.0;
+        let sun_azi = PI;
+        let alt = PI / 3.0;
+        let azi = PI / 2.0;
+
+        let l_clear = sky_luminance(SkyType::Clear, alt, azi, sun_alt, sun_azi);
+        let l_overcast = sky_luminance(SkyType::Overcast, alt, azi, sun_alt, sun_azi);
+        let l_intermediate = sky_luminance(SkyType::Intermediate, alt, azi, sun_alt, sun_azi);
+
+        // Intermediate sky luminance should be positive
+        assert!(l_intermediate > 0.0, "intermediate={l_intermediate}");
+        // All three should be positive finite values (valid luminances)
+        assert!(l_clear > 0.0, "clear={l_clear}");
+        assert!(l_overcast > 0.0, "overcast={l_overcast}");
+    }
+
+    #[test]
+    fn sky_luminance_below_horizon() {
+        // altitude <= 0 should return 0 for all sky types
+        let sun_alt = PI / 4.0;
+        let sun_azi = 0.0;
+
+        let l_clear = sky_luminance(SkyType::Clear, 0.0, 0.0, sun_alt, sun_azi);
+        assert!((l_clear).abs() < 1e-10, "clear={l_clear}");
+
+        let l_turbid = sky_luminance(SkyType::ClearTurbid, -0.1, 0.0, sun_alt, sun_azi);
+        assert!((l_turbid).abs() < 1e-10, "turbid={l_turbid}");
+
+        let l_inter = sky_luminance(SkyType::Intermediate, 0.0, PI, sun_alt, sun_azi);
+        assert!((l_inter).abs() < 1e-10, "intermediate={l_inter}");
+
+        let l_over = sky_luminance(SkyType::Overcast, -0.05, 0.0, sun_alt, sun_azi);
+        assert!((l_over).abs() < 1e-10, "overcast={l_over}");
+    }
+
+    #[test]
+    fn horizontal_illuminance_intermediate() {
+        // Intermediate sky should give positive illuminance when sun is up
+        let e = horizontal_sky_illuminance(SkyType::Intermediate, PI / 4.0, PI, 18, 8);
+        assert!(e > 0.0, "intermediate illuminance={e}");
+    }
+
+    #[test]
+    fn angular_distance_zenith_to_horizon() {
+        // Zenith (alt=pi/2, any azi) to horizon (alt=0, same azi) = pi/2
+        let d = angular_distance(PI / 2.0, 0.0, 0.0, 0.0);
+        assert!((d - PI / 2.0).abs() < 0.01, "d={d}, expected={}", PI / 2.0);
+    }
+
+    #[test]
+    fn clear_sky_circumsolar_peak() {
+        let sun_alt = PI / 3.0;
+        let sun_azi = PI;
+
+        // Luminance at the sun position (circumsolar region)
+        let l_at_sun = sky_luminance(SkyType::Clear, sun_alt, sun_azi, sun_alt, sun_azi);
+        // Luminance 90 degrees away in azimuth
+        let l_away = sky_luminance(SkyType::Clear, sun_alt, sun_azi + PI / 2.0, sun_alt, sun_azi);
+
+        // The circumsolar peak should make luminance much higher at the sun position
+        assert!(l_at_sun > l_away * 2.0,
+            "at_sun={l_at_sun}, away={l_away}, ratio={}",
+            l_at_sun / l_away);
+    }
 }

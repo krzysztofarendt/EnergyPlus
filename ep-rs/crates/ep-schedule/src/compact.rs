@@ -168,4 +168,126 @@ mod tests {
         let dt = parse_day_types("Weekdays").unwrap();
         assert_eq!(dt, vec![DayType::Weekdays]);
     }
+
+    #[test]
+    fn parse_compact_full_schedule() {
+        let fields = &[
+            "Through: 12/31,",
+            "For: AllDays,",
+            "Until: 8:00,",
+            "0.0,",
+            "Until: 18:00,",
+            "1.0,",
+            "Until: 24:00,",
+            "0.5;",
+        ];
+        let cs = parse_compact_schedule("test", fields).unwrap();
+        assert_eq!(cs.entries.len(), 1);
+        assert_eq!(cs.entries[0].through_month, 12);
+        assert_eq!(cs.entries[0].through_day, 31);
+        assert_eq!(cs.entries[0].day_types, vec![DayType::AllDays]);
+        assert_eq!(cs.entries[0].until_values.len(), 3);
+        assert_eq!(cs.entries[0].until_values[0], (8, 0, 0.0));
+        assert_eq!(cs.entries[0].until_values[1], (18, 0, 1.0));
+        assert_eq!(cs.entries[0].until_values[2], (24, 0, 0.5));
+    }
+
+    #[test]
+    fn parse_compact_multiple_for_blocks() {
+        let fields = &[
+            "Through: 12/31,",
+            "For: Weekdays,",
+            "Until: 24:00,",
+            "1.0,",
+            "For: Saturday,",
+            "Until: 24:00,",
+            "0.5;",
+        ];
+        let cs = parse_compact_schedule("multi_for", fields).unwrap();
+        // Two entries (one per For block), same Through date
+        assert_eq!(cs.entries.len(), 2);
+        assert_eq!(cs.entries[0].day_types, vec![DayType::Weekdays]);
+        assert_eq!(cs.entries[0].until_values[0].2, 1.0);
+        assert_eq!(cs.entries[1].day_types, vec![DayType::Saturday]);
+        assert_eq!(cs.entries[1].until_values[0].2, 0.5);
+    }
+
+    #[test]
+    fn parse_compact_case_insensitive() {
+        let fields = &[
+            "through: 6/30,",
+            "for: AllDays,",
+            "until: 24:00,",
+            "0.7;",
+        ];
+        let cs = parse_compact_schedule("lower", fields).unwrap();
+        assert_eq!(cs.entries.len(), 1);
+        assert_eq!(cs.entries[0].through_month, 6);
+        assert_eq!(cs.entries[0].through_day, 30);
+        assert_eq!(cs.entries[0].until_values[0].2, 0.7);
+    }
+
+    #[test]
+    fn parse_date_invalid() {
+        assert!(parse_date("not_a_date").is_err());
+        assert!(parse_date("13").is_err());
+        assert!(parse_date("").is_err());
+    }
+
+    #[test]
+    fn parse_time_invalid() {
+        assert!(parse_time("bad").is_err());
+        assert!(parse_time("25").is_err());
+        assert!(parse_time("").is_err());
+    }
+
+    #[test]
+    fn parse_day_types_multiple() {
+        let dt = parse_day_types("Weekdays,Holiday").unwrap();
+        assert_eq!(dt.len(), 2);
+        assert_eq!(dt[0], DayType::Weekdays);
+        assert_eq!(dt[1], DayType::Holiday);
+    }
+
+    #[test]
+    fn parse_day_types_empty() {
+        assert!(parse_day_types("").is_err());
+    }
+
+    #[test]
+    fn parse_compact_round_trip() {
+        // Parse a schedule and then evaluate it at various times
+        let fields = &[
+            "Through: 6/30,",
+            "For: AllDays,",
+            "Until: 12:00,",
+            "0.3,",
+            "Until: 24:00,",
+            "0.9,",
+            "Through: 12/31,",
+            "For: AllDays,",
+            "Until: 24:00,",
+            "0.1;",
+        ];
+        let cs = parse_compact_schedule("roundtrip", fields).unwrap();
+
+        // Evaluate in May at 6 AM -> Through 6/30, Until 12:00 -> 0.3
+        let mut c = ep_core::time::SimulationClock::new(1);
+        c.month = 5;
+        c.day_of_month = 10;
+        c.day_of_week = ep_core::time::Weekday::Wednesday;
+        c.hour_of_day = 6;
+        c.timestep_in_hour = 0;
+        assert_eq!(cs.value_at(&c), 0.3);
+
+        // Evaluate in May at 15:00 -> Through 6/30, Until 24:00 -> 0.9
+        c.hour_of_day = 15;
+        assert_eq!(cs.value_at(&c), 0.9);
+
+        // Evaluate in October -> Through 12/31, Until 24:00 -> 0.1
+        c.month = 10;
+        c.day_of_month = 5;
+        c.hour_of_day = 10;
+        assert_eq!(cs.value_at(&c), 0.1);
+    }
 }

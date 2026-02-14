@@ -175,4 +175,17 @@ mod tests {
         assert!(trend.max(3).is_none());
         assert!(trend.direction(3).is_none());
     }
+
+    #[test]
+    fn trend_direction_decreasing() {
+        let mut trend = TrendVariable::new("T", 10);
+        // Push decreasing values: 5, 4, 3, 2, 1
+        // In buffer: [1, 2, 3, 4, 5]
+        // Temporal direction is decreasing -> negative slope
+        for v in [5.0, 4.0, 3.0, 2.0, 1.0] {
+            trend.push(v);
+        }
+        let dir = trend.direction(5).unwrap();
+        assert!(dir < 0.0, "direction should be negative for decreasing series, got {}", dir);
+    }
 }

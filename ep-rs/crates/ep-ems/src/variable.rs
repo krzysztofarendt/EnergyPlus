@@ -181,4 +181,22 @@ mod tests {
         assert!(vm.find("myvariable").is_some());
         assert!(vm.find("MYVARIABLE").is_some());
     }
+
+    #[test]
+    fn erl_value_null_as_number() {
+        let val = ErlValue::Null;
+        assert!((val.as_number() - 0.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn erl_value_error_as_number() {
+        let val = ErlValue::Error("some error".into());
+        assert!((val.as_number() - 0.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn variable_manager_find_nonexistent() {
+        let vm = VariableManager::default();
+        assert!(vm.find("nonexistent").is_none());
+    }
 }

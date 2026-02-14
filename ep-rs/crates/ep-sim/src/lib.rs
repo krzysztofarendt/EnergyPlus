@@ -438,4 +438,113 @@ mod tests {
         assert_eq!(result.total_timesteps, 24);
         assert_eq!(result.total_hvac_iterations, 72); // 24 * 3
     }
+
+    #[test]
+    fn run_period_single_day() {
+        let rp = RunPeriod::new("Jan1", 1, 1, 1, 1);
+        assert_eq!(rp.total_days(false), 1);
+    }
+
+    #[test]
+    fn run_period_leap_feb() {
+        let rp = RunPeriod::new("Feb", 2, 1, 2, 29);
+        assert_eq!(rp.total_days(true), 29);
+    }
+
+    #[test]
+    fn simulation_result_zero_timesteps() {
+        let result = SimulationResult {
+            environments_completed: 0,
+            warmup_days_used: vec![],
+            total_timesteps: 0,
+            total_hvac_iterations: 0,
+        };
+        assert!((result.avg_hvac_iterations() - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_multiple_design_days() {
+        let config = SimulationConfig {
+            timesteps_per_hour: 1,
+            max_warmup_days: 1,
+            min_warmup_days: 1,
+            run_design_days: true,
+            run_weather_periods: false,
+            ..Default::default()
+        };
+        let mut driver = SimulationDriver::new(config);
+        driver.design_days.push(DesignDayRef {
+            index: 0,
+            env_type: EnvironmentType::DesignDay,
+        });
+        driver.design_days.push(DesignDayRef {
+            index: 1,
+            env_type: EnvironmentType::DesignDay,
+        });
+
+        let mut state = SimulationState::new(1);
+        let mut callback = NullCallback;
+        let result = driver.run(&mut state, &mut callback);
+
+        assert_eq!(result.environments_completed, 2);
+    }
+
+    #[test]
+    fn run_period_repeat() {
+        let config = SimulationConfig {
+            timesteps_per_hour: 1,
+            max_warmup_days: 1,
+            min_warmup_days: 1,
+            run_design_days: false,
+            run_weather_periods: true,
+            ..Default::default()
+        };
+        let mut driver = SimulationDriver::new(config);
+        let mut rp = RunPeriod::new("Jan1-3", 1, 1, 1, 3);
+        rp.num_times_to_repeat = 2;
+        driver.run_periods.push(rp);
+
+        let mut state = SimulationState::new(1);
+        let mut callback = NullCallback;
+        let result = driver.run(&mut state, &mut callback);
+
+        // 2 repeats → 2 environments completed
+        assert_eq!(result.environments_completed, 2);
+        // Each environment: 3 days * 24 hr * 1 ts/hr = 72 timesteps
+        assert_eq!(result.total_timesteps, 144);
+    }
+
+    #[test]
+    fn hvac_max_iterations_reached() {
+        struct NonConvergingCallback;
+        impl SimulationCallback for NonConvergingCallback {
+            fn do_hvac_iteration(&mut self, _state: &mut SimulationState) -> f64 {
+                // Always return a large residual — never converges
+                1000.0
+            }
+        }
+
+        let config = SimulationConfig {
+            timesteps_per_hour: 1,
+            max_hvac_iterations: 5,
+            max_warmup_days: 1,
+            min_warmup_days: 1,
+            run_design_days: true,
+            run_weather_periods: false,
+            ..Default::default()
+        };
+        let mut driver = SimulationDriver::new(config);
+        driver.design_days.push(DesignDayRef {
+            index: 0,
+            env_type: EnvironmentType::DesignDay,
+        });
+
+        let mut state = SimulationState::new(1);
+        let mut callback = NonConvergingCallback;
+        let result = driver.run(&mut state, &mut callback);
+
+        assert_eq!(result.total_timesteps, 24);
+        // Each timestep hits the max of 5 iterations
+        assert_eq!(result.total_hvac_iterations, 24 * 5);
+    }
 }

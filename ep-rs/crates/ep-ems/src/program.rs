@@ -543,4 +543,285 @@ mod tests {
         assert!((vars.get(a_idx).unwrap().as_number() - 1.0).abs() < 1e-10);
         assert!(vars.get(b_idx).unwrap().is_null()); // Never reached
     }
+
+    #[test]
+    fn elseif_chain() {
+        // IF x > 10 → SET result = 1 (false)
+        // ELSEIF x > 5 → SET result = 2 (true, x=7)
+        // ELSE → SET result = 3
+        // ENDIF
+        let mut vars = VariableManager::default();
+        let x_idx = vars.add("x", false);
+        let result_idx = vars.add("result", false);
+        vars.set(x_idx, ErlValue::Number(7.0));
+
+        let mut prog = ErlProgram::new("ElseIfChain");
+
+        // Expressions
+        let var_x = prog.add_expression(ErlExpression { op: ErlOp::Variable(x_idx), operands: vec![] });
+        let lit10 = prog.add_literal(10.0);
+        let expr_10 = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit10), operands: vec![] });
+        let lit5 = prog.add_literal(5.0);
+        let expr_5 = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit5), operands: vec![] });
+        let cond_gt10 = prog.add_expression(ErlExpression { op: ErlOp::GreaterThan, operands: vec![var_x, expr_10] });
+        let var_x2 = prog.add_expression(ErlExpression { op: ErlOp::Variable(x_idx), operands: vec![] });
+        let cond_gt5 = prog.add_expression(ErlExpression { op: ErlOp::GreaterThan, operands: vec![var_x2, expr_5] });
+
+        let lit1 = prog.add_literal(1.0);
+        let expr_1 = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit1), operands: vec![] });
+        let lit2 = prog.add_literal(2.0);
+        let expr_2 = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit2), operands: vec![] });
+        let lit3 = prog.add_literal(3.0);
+        let expr_3 = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit3), operands: vec![] });
+
+        // inst 0: IF x > 10, false → jump to inst 3 (ELSEIF)
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::If, arg1: 3, arg2: cond_gt10 });
+        // inst 1: SET result = 1
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::Set, arg1: result_idx, arg2: expr_1 });
+        // inst 2: GOTO endif (inst 8)
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::Goto, arg1: 8, arg2: 0 });
+        // inst 3: ELSEIF x > 5, false → jump to inst 6 (ELSE)
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::ElseIf, arg1: 6, arg2: cond_gt5 });
+        // inst 4: SET result = 2
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::Set, arg1: result_idx, arg2: expr_2 });
+        // inst 5: GOTO endif (inst 8)
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::Goto, arg1: 8, arg2: 0 });
+        // inst 6: ELSE
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::Else, arg1: 0, arg2: 0 });
+        // inst 7: SET result = 3
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::Set, arg1: result_idx, arg2: expr_3 });
+        // inst 8: ENDIF
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::EndIf, arg1: 0, arg2: 0 });
+
+        prog.execute(&mut vars);
+        assert!((vars.get(result_idx).unwrap().as_number() - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn nested_if() {
+        // IF x > 0 → IF y > 0 → SET result = 1
+        let mut vars = VariableManager::default();
+        let x_idx = vars.add("x", false);
+        let y_idx = vars.add("y", false);
+        let result_idx = vars.add("result", false);
+        vars.set(x_idx, ErlValue::Number(5.0));
+        vars.set(y_idx, ErlValue::Number(3.0));
+
+        let mut prog = ErlProgram::new("NestedIf");
+
+        let var_x = prog.add_expression(ErlExpression { op: ErlOp::Variable(x_idx), operands: vec![] });
+        let var_y = prog.add_expression(ErlExpression { op: ErlOp::Variable(y_idx), operands: vec![] });
+        let lit0 = prog.add_literal(0.0);
+        let expr_0 = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit0), operands: vec![] });
+        let expr_0b = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit0), operands: vec![] });
+        let cond_x = prog.add_expression(ErlExpression { op: ErlOp::GreaterThan, operands: vec![var_x, expr_0] });
+        let cond_y = prog.add_expression(ErlExpression { op: ErlOp::GreaterThan, operands: vec![var_y, expr_0b] });
+
+        let lit1 = prog.add_literal(1.0);
+        let expr_1 = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit1), operands: vec![] });
+
+        // inst 0: IF x > 0, false → jump to inst 4 (outer endif)
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::If, arg1: 4, arg2: cond_x });
+        // inst 1: IF y > 0, false → jump to inst 3 (inner endif)
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::If, arg1: 3, arg2: cond_y });
+        // inst 2: SET result = 1
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::Set, arg1: result_idx, arg2: expr_1 });
+        // inst 3: ENDIF (inner)
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::EndIf, arg1: 0, arg2: 0 });
+        // inst 4: ENDIF (outer)
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::EndIf, arg1: 0, arg2: 0 });
+
+        prog.execute(&mut vars);
+        assert!((vars.get(result_idx).unwrap().as_number() - 1.0).abs() < 1e-10);
+
+        // Now test with y <= 0: result should stay at Null
+        let mut vars2 = VariableManager::default();
+        let x2_idx = vars2.add("x", false);
+        let y2_idx = vars2.add("y", false);
+        let result2_idx = vars2.add("result", false);
+        vars2.set(x2_idx, ErlValue::Number(5.0));
+        vars2.set(y2_idx, ErlValue::Number(-1.0));
+
+        prog.execute(&mut vars2);
+        assert!(vars2.get(result2_idx).unwrap().is_null());
+    }
+
+    #[test]
+    fn while_zero_iterations() {
+        // WHILE false → body never executes
+        let mut vars = VariableManager::default();
+        let result_idx = vars.add("result", false);
+        vars.set(result_idx, ErlValue::Number(0.0));
+
+        let mut prog = ErlProgram::new("WhileZero");
+
+        // Condition: 0 < 0 (always false)
+        let lit0a = prog.add_literal(0.0);
+        let expr_0a = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit0a), operands: vec![] });
+        let lit0b = prog.add_literal(0.0);
+        let expr_0b = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit0b), operands: vec![] });
+        let cond = prog.add_expression(ErlExpression { op: ErlOp::LessThan, operands: vec![expr_0a, expr_0b] });
+
+        let lit99 = prog.add_literal(99.0);
+        let expr_99 = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit99), operands: vec![] });
+
+        // inst 0: WHILE false → jump to inst 3
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::While, arg1: 3, arg2: cond });
+        // inst 1: SET result = 99 (should NOT execute)
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::Set, arg1: result_idx, arg2: expr_99 });
+        // inst 2: ENDWHILE → jump to inst 0
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::EndWhile, arg1: 0, arg2: 0 });
+
+        prog.execute(&mut vars);
+        // result should remain 0.0
+        assert!((vars.get(result_idx).unwrap().as_number()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn while_max_iterations_safety() {
+        // WHILE true → infinite loop, should terminate at max iterations
+        let mut vars = VariableManager::default();
+        let counter_idx = vars.add("counter", false);
+        vars.set(counter_idx, ErlValue::Number(0.0));
+
+        let mut prog = ErlProgram::new("InfiniteWhile");
+
+        // Condition: 1 == 1 (always true)
+        let lit1a = prog.add_literal(1.0);
+        let expr_1a = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit1a), operands: vec![] });
+        let lit1b = prog.add_literal(1.0);
+        let expr_1b = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit1b), operands: vec![] });
+        let cond = prog.add_expression(ErlExpression { op: ErlOp::Equal, operands: vec![expr_1a, expr_1b] });
+
+        // Body: counter = counter + 1
+        let var_ctr = prog.add_expression(ErlExpression { op: ErlOp::Variable(counter_idx), operands: vec![] });
+        let lit1 = prog.add_literal(1.0);
+        let expr_1 = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit1), operands: vec![] });
+        let add_expr = prog.add_expression(ErlExpression { op: ErlOp::Add, operands: vec![var_ctr, expr_1] });
+
+        // inst 0: WHILE true → jump to inst 3 if false (never)
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::While, arg1: 3, arg2: cond });
+        // inst 1: SET counter = counter + 1
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::Set, arg1: counter_idx, arg2: add_expr });
+        // inst 2: ENDWHILE → jump to inst 0
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::EndWhile, arg1: 0, arg2: 0 });
+
+        prog.execute(&mut vars);
+        // Should have stopped due to max_iterations (1_000_000) safety
+        let count = vars.get(counter_idx).unwrap().as_number();
+        assert!(count > 0.0, "counter should have incremented");
+        assert!(count <= 1_000_001.0, "counter should be bounded by max iterations");
+    }
+
+    #[test]
+    fn goto_instruction() {
+        // SET a = 1
+        // GOTO inst 3 (skip SET b = 2)
+        // SET b = 2
+        // (end)
+        let mut vars = VariableManager::default();
+        let a_idx = vars.add("a", false);
+        let b_idx = vars.add("b", false);
+
+        let mut prog = ErlProgram::new("GotoProg");
+
+        let lit1 = prog.add_literal(1.0);
+        let expr_1 = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit1), operands: vec![] });
+        let lit2 = prog.add_literal(2.0);
+        let expr_2 = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit2), operands: vec![] });
+
+        // inst 0: SET a = 1
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::Set, arg1: a_idx, arg2: expr_1 });
+        // inst 1: GOTO inst 3 (past end of instructions, exit)
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::Goto, arg1: 3, arg2: 0 });
+        // inst 2: SET b = 2 (should be skipped)
+        prog.instructions.push(ErlInstruction { keyword: ErlKeyword::Set, arg1: b_idx, arg2: expr_2 });
+
+        prog.execute(&mut vars);
+        assert!((vars.get(a_idx).unwrap().as_number() - 1.0).abs() < 1e-10);
+        assert!(vars.get(b_idx).unwrap().is_null()); // Skipped by goto
+    }
+
+    #[test]
+    fn negate_operation() {
+        // SET result = -5.0 using Negate op
+        let mut vars = VariableManager::default();
+        let result_idx = vars.add("result", false);
+
+        let mut prog = ErlProgram::new("NegateProg");
+
+        let lit5 = prog.add_literal(5.0);
+        let expr_5 = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit5), operands: vec![] });
+        let expr_neg = prog.add_expression(ErlExpression { op: ErlOp::Negate, operands: vec![expr_5] });
+
+        prog.instructions.push(ErlInstruction {
+            keyword: ErlKeyword::Set,
+            arg1: result_idx,
+            arg2: expr_neg,
+        });
+
+        prog.execute(&mut vars);
+        assert!((vars.get(result_idx).unwrap().as_number() - (-5.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn power_operation() {
+        // SET result = 2^10 = 1024
+        let mut vars = VariableManager::default();
+        let result_idx = vars.add("result", false);
+
+        let mut prog = ErlProgram::new("PowerProg");
+
+        let lit2 = prog.add_literal(2.0);
+        let expr_2 = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit2), operands: vec![] });
+        let lit10 = prog.add_literal(10.0);
+        let expr_10 = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit10), operands: vec![] });
+        let expr_pow = prog.add_expression(ErlExpression { op: ErlOp::Power, operands: vec![expr_2, expr_10] });
+
+        prog.instructions.push(ErlInstruction {
+            keyword: ErlKeyword::Set,
+            arg1: result_idx,
+            arg2: expr_pow,
+        });
+
+        prog.execute(&mut vars);
+        assert!((vars.get(result_idx).unwrap().as_number() - 1024.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn logical_and_or() {
+        // AND(1, 0) = 0, OR(1, 0) = 1
+        let mut vars = VariableManager::default();
+        let and_idx = vars.add("and_result", false);
+        let or_idx = vars.add("or_result", false);
+
+        let mut prog = ErlProgram::new("LogicProg");
+
+        let lit1 = prog.add_literal(1.0);
+        let expr_1a = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit1), operands: vec![] });
+        let lit0 = prog.add_literal(0.0);
+        let expr_0a = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit0), operands: vec![] });
+        let expr_and = prog.add_expression(ErlExpression { op: ErlOp::And, operands: vec![expr_1a, expr_0a] });
+
+        let expr_1b = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit1), operands: vec![] });
+        let expr_0b = prog.add_expression(ErlExpression { op: ErlOp::Literal(lit0), operands: vec![] });
+        let expr_or = prog.add_expression(ErlExpression { op: ErlOp::Or, operands: vec![expr_1b, expr_0b] });
+
+        // SET and_result = AND(1, 0)
+        prog.instructions.push(ErlInstruction {
+            keyword: ErlKeyword::Set,
+            arg1: and_idx,
+            arg2: expr_and,
+        });
+        // SET or_result = OR(1, 0)
+        prog.instructions.push(ErlInstruction {
+            keyword: ErlKeyword::Set,
+            arg1: or_idx,
+            arg2: expr_or,
+        });
+
+        prog.execute(&mut vars);
+        assert!((vars.get(and_idx).unwrap().as_number() - 0.0).abs() < 1e-10);
+        assert!((vars.get(or_idx).unwrap().as_number() - 1.0).abs() < 1e-10);
+    }
 }

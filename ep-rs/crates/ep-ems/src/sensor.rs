@@ -51,4 +51,11 @@ mod tests {
         sensor.update(23.5);
         assert!((sensor.current_value - 23.5).abs() < 1e-10);
     }
+
+    #[test]
+    fn sensor_new_defaults() {
+        let sensor = Sensor::new("TestSensor", "Some Var", "Key1");
+        assert!(sensor.variable_index.is_none());
+        assert!((sensor.current_value - 0.0).abs() < 1e-15);
+    }
 }

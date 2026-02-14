@@ -290,4 +290,92 @@ mod tests {
         // Net LW should be negative (surface warmer than avg surroundings)
         assert!(q < 0.0, "q_lw={q}");
     }
+
+    // ─── New heat balance tests ──────────────────────────────────────
+
+    #[test]
+    fn outside_no_solar_no_lw() {
+        // With zero solar and LW, the surface should equilibrate near air temperature
+        let ctf = simple_ctf();
+        let t_air = 20.0;
+        let result = solve_outside_surface_temp(
+            &ctf,
+            t_air,  // T_air
+            10.0,   // h_conv
+            0.0,    // q_solar = 0
+            0.0,    // q_lw = 0
+            &[t_air],  // T_outside history = air temp (steady)
+            &[t_air],  // T_inside history = same (isothermal)
+            &[0.0],    // q_history
+        );
+
+        // Surface should be reasonably close to air temperature when isothermal
+        // With CTF history terms, some deviation is expected
+        assert!(
+            (result.t_surface - t_air).abs() < 5.0,
+            "T_surf={} should be close to T_air={} with no solar/LW",
+            result.t_surface,
+            t_air
+        );
+    }
+
+    #[test]
+    fn inside_with_sw_gains() {
+        // 100 W/m2 shortwave gains → surface should be warmer than zone air
+        let ctf = simple_ctf();
+        let t_zone = 22.0;
+        let result = solve_inside_surface_temp(
+            &ctf,
+            t_zone, // T_zone
+            3.0,    // h_conv
+            100.0,  // q_sw = 100 W/m2 (strong shortwave)
+            0.0,    // q_lw = 0
+            &[t_zone],
+            &[t_zone],
+            &[0.0],
+        );
+
+        assert!(
+            result.t_surface > t_zone,
+            "T_surf={} should be > T_zone={} with 100 W/m2 SW gains",
+            result.t_surface,
+            t_zone
+        );
+    }
+
+    #[test]
+    fn exterior_lw_surface_warmer() {
+        // Warm surface (30C = 303.15K), cool sky (-10C = 263.15K), cool ground (5C = 278.15K)
+        // Surface warmer than surroundings → should lose heat (q_lw < 0)
+        let q = exterior_longwave_flux(
+            0.9,    // emissivity
+            303.15, // surface = 30C
+            263.15, // sky = -10C
+            278.15, // ground = 5C
+            0.5,    // view factor sky
+            0.5,    // view factor ground
+        );
+        assert!(
+            q < 0.0,
+            "Warm surface should lose heat via LW: q_lw={q}"
+        );
+    }
+
+    #[test]
+    fn exterior_lw_surface_cooler() {
+        // Cool surface (0C = 273.15K), warm sky (20C = 293.15K), warm ground (25C = 298.15K)
+        // Surface cooler than surroundings → should gain heat (q_lw > 0)
+        let q = exterior_longwave_flux(
+            0.9,    // emissivity
+            273.15, // surface = 0C
+            293.15, // sky = 20C
+            298.15, // ground = 25C
+            0.5,    // view factor sky
+            0.5,    // view factor ground
+        );
+        assert!(
+            q > 0.0,
+            "Cool surface should gain heat via LW: q_lw={q}"
+        );
+    }
 }

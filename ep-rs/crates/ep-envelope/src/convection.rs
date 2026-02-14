@@ -235,4 +235,133 @@ mod tests {
         // Should be around 4-5 W/(m2-K) for typical conditions
         assert!(h > 3.0 && h < 7.0, "h={h}");
     }
+
+    // ─── New convection tests ────────────────────────────────────────
+
+    #[test]
+    fn ashrae_interior_upward() {
+        // cos_tilt=0.5 → upward-facing (> 0.3827), returns 4.043
+        let h = ashrae_interior_convection(0.5);
+        assert!((h - 4.043).abs() < 1e-10, "h={h}");
+        assert!(h > 3.0, "upward h should be reasonable");
+    }
+
+    #[test]
+    fn ashrae_interior_downward() {
+        // cos_tilt=-0.5 → downward-facing (< -0.3827), returns 0.948
+        let h = ashrae_interior_convection(-0.5);
+        assert!((h - 0.948).abs() < 1e-10, "h={h}");
+        // Downward h should be lower than upward h
+        let h_up = ashrae_interior_convection(0.5);
+        assert!(h < h_up, "downward h={h} should be < upward h={h_up}");
+    }
+
+    #[test]
+    fn tarp_large_delta_t() {
+        // 50K temperature difference on vertical wall: h = 1.31 * 50^(1/3)
+        let h = tarp_interior_convection(50.0, 0.0, 3.0);
+        let expected = 1.31 * 50.0_f64.powf(1.0 / 3.0);
+        assert!((h - expected).abs() < 1e-10, "h={h}, expected={expected}");
+        // h should scale with dt^(1/3): compare to 5K case
+        let h_small = tarp_interior_convection(5.0, 0.0, 3.0);
+        let ratio = h / h_small;
+        let expected_ratio = (50.0_f64 / 5.0).powf(1.0 / 3.0);
+        assert!(
+            (ratio - expected_ratio).abs() < 1e-6,
+            "ratio={ratio}, expected_ratio={expected_ratio}"
+        );
+    }
+
+    #[test]
+    fn tarp_heated_ceiling() {
+        // Heated ceiling: surface warmer (+5K), cos_tilt=-1 (face-down)
+        // delta_t=5, cos_tilt=-1 → delta_t * cos_tilt = -5 < 0 → stable (cooled_floor_or_heated_ceiling)
+        let h = tarp_interior_convection(5.0, -1.0, 3.0);
+        // Stable regime: h = 1.810 * |dT|^(1/3) / (1.382 + |cos_tilt|)
+        let expected = 1.810 * 5.0_f64.powf(1.0 / 3.0) / (1.382 + 1.0);
+        assert!((h - expected).abs() < 1e-10, "h={h}, expected={expected}");
+        // Stable → lower convection compared to vertical
+        let h_vert = tarp_interior_convection(5.0, 0.0, 3.0);
+        assert!(h < h_vert, "heated ceiling h={h} should be < vertical h={h_vert}");
+    }
+
+    #[test]
+    fn tarp_cooled_ceiling() {
+        // Cooled ceiling: surface cooler (-5K), cos_tilt=-1 (face-down)
+        // delta_t=-5, cos_tilt=-1 → delta_t * cos_tilt = 5 > 0 → unstable (heated_floor_or_cooled_ceiling)
+        let h = tarp_interior_convection(-5.0, -1.0, 3.0);
+        // Unstable regime: h = 9.482 * |dT|^(1/3) / (7.283 - |cos_tilt|)
+        let expected = 9.482 * 5.0_f64.powf(1.0 / 3.0) / (7.283 - 1.0);
+        assert!((h - expected).abs() < 1e-10, "h={h}, expected={expected}");
+        // Unstable → higher convection compared to stable heated ceiling
+        let h_stable = tarp_interior_convection(5.0, -1.0, 3.0);
+        assert!(
+            h > h_stable,
+            "cooled ceiling h={h} should be > heated ceiling h={h_stable}"
+        );
+    }
+
+    #[test]
+    fn doe2_exterior_zero_wind() {
+        // With zero wind speed, forced convection is zero → result equals natural only
+        let h = doe2_exterior_convection(5.0, 0.0, 0.0, SurfaceRoughness::MediumRough);
+        let h_natural = tarp_interior_convection(5.0, 0.0, 1.0);
+        assert!(
+            (h - h_natural).abs() < 1e-10,
+            "h={h} should equal h_natural={h_natural} at zero wind"
+        );
+    }
+
+    #[test]
+    fn doe2_exterior_rough_vs_smooth() {
+        // Rough roughness should give higher h than VerySmooth at same wind
+        let h_rough = doe2_exterior_convection(5.0, 0.0, 5.0, SurfaceRoughness::Rough);
+        let h_smooth = doe2_exterior_convection(5.0, 0.0, 5.0, SurfaceRoughness::VerySmooth);
+        assert!(
+            h_rough > h_smooth,
+            "Rough h={h_rough} should be > VerySmooth h={h_smooth}"
+        );
+        // Verify the difference comes from roughness multiplier
+        let rf_rough = SurfaceRoughness::Rough.doe2_roughness_multiplier();
+        let rf_smooth = SurfaceRoughness::VerySmooth.doe2_roughness_multiplier();
+        assert!(rf_rough > rf_smooth);
+    }
+
+    #[test]
+    fn ashrae_exterior_zero_wind() {
+        // At zero wind: h = D + E*0 + F*0 = D, clamped to at least 0.1
+        let h = ashrae_exterior_convection(0.0, SurfaceRoughness::MediumRough);
+        let (d, _e, _f) = SurfaceRoughness::MediumRough.ashrae_ext_conv_coeffs();
+        assert!((h - d).abs() < 1e-10, "h={h}, D={d}");
+        assert!(h >= 0.1, "h={h} should be >= 0.1");
+    }
+
+    #[test]
+    fn local_wind_speed_open_terrain() {
+        // Open terrain: exponent=0.14, thickness=270 (same as met station)
+        let v_open = local_wind_speed(5.0, 15.0, 0.14, 270.0);
+        // Urban terrain: exponent=0.33, thickness=460
+        let v_urban = local_wind_speed(5.0, 15.0, 0.33, 460.0);
+        // Open terrain should have higher local wind speed than urban
+        assert!(
+            v_open > v_urban,
+            "open v={v_open} should be > urban v={v_urban}"
+        );
+        // For open terrain at met height (10m), with same parameters as met station,
+        // but since z is clamped to max(surface_height, z_met)=max(15,10)=15,
+        // v should be somewhat close to met wind speed
+        assert!(v_open > 0.0 && v_open < 10.0, "v_open={v_open}");
+    }
+
+    #[test]
+    fn local_wind_speed_below_met_height() {
+        // Surface height below met height (10m) → clamped to met height
+        let v_low = local_wind_speed(5.0, 3.0, 0.22, 370.0);
+        let v_at_met = local_wind_speed(5.0, 10.0, 0.22, 370.0);
+        // Both should give same result since 3m is clamped to 10m
+        assert!(
+            (v_low - v_at_met).abs() < 1e-10,
+            "v_low={v_low} should equal v_at_met={v_at_met} (clamped)"
+        );
+    }
 }

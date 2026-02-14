@@ -209,4 +209,84 @@ mod tests {
         let result = b.calculate(60.0, 2.0, 100_000.0, None);
         assert!((result.electric_power - 200.0).abs() < 1.0);
     }
+
+    #[test]
+    fn boiler_min_plr_clamp() {
+        let mut b = Boiler::new("Test", 100_000.0, 0.80, 82.0, 2.0);
+        b.min_plr = 0.2;
+
+        // Request only 5000W = 5% of capacity, below min_plr of 0.2
+        let result = b.calculate(60.0, 2.0, 5_000.0, None);
+
+        // PLR should be clamped to min_plr = 0.2
+        assert!(
+            (result.part_load_ratio - 0.2).abs() < 0.01,
+            "PLR={}, expected 0.2",
+            result.part_load_ratio
+        );
+        // Heating output = capacity * min_plr = 100_000 * 0.2 = 20_000
+        assert!(
+            (result.heating_rate - 20_000.0).abs() < 100.0,
+            "heating={}",
+            result.heating_rate
+        );
+    }
+
+    #[test]
+    fn boiler_max_plr_clamp() {
+        let b = Boiler::new("Test", 100_000.0, 0.80, 82.0, 2.0);
+
+        // Request 200_000W, double the capacity
+        let result = b.calculate(60.0, 2.0, 200_000.0, None);
+
+        // PLR should be clamped to max_plr = 1.0
+        assert!(
+            (result.part_load_ratio - 1.0).abs() < 0.01,
+            "PLR={}",
+            result.part_load_ratio
+        );
+        // Output limited to nominal capacity
+        assert!(
+            (result.heating_rate - 100_000.0).abs() < 100.0,
+            "heating={}",
+            result.heating_rate
+        );
+    }
+
+    #[test]
+    fn boiler_efficiency_clamp() {
+        // Construct with efficiency > 1.0; it gets clamped to 1.0
+        let b = Boiler::new("OverEff", 100_000.0, 1.5, 82.0, 2.0);
+        assert!(
+            (b.nominal_efficiency - 1.0).abs() < 1e-10,
+            "eff={}",
+            b.nominal_efficiency
+        );
+
+        // At full load with efficiency=1.0, fuel_rate == heating_rate
+        let result = b.calculate(60.0, 2.0, 100_000.0, None);
+        assert!(
+            (result.fuel_rate - result.heating_rate).abs() < 100.0,
+            "fuel={}, heat={}",
+            result.fuel_rate,
+            result.heating_rate
+        );
+    }
+
+    #[test]
+    fn boiler_negative_load() {
+        let b = Boiler::new("Test", 100_000.0, 0.80, 82.0, 2.0);
+
+        // Negative load → zero output (early return path)
+        let result = b.calculate(60.0, 2.0, -50_000.0, None);
+
+        assert!(result.heating_rate.abs() < 1e-10, "heating={}", result.heating_rate);
+        assert!(result.fuel_rate.abs() < 1e-10, "fuel={}", result.fuel_rate);
+        assert!(
+            (result.outlet_temp - 60.0).abs() < 1e-10,
+            "T_out={}",
+            result.outlet_temp
+        );
+        assert!(result.part_load_ratio.abs() < 1e-10);
+    }
 }

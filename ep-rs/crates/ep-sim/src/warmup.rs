@@ -225,4 +225,113 @@ mod tests {
         tracker.update_loads(0.0, 0.0);
         assert!(tracker.check_convergence(0.04));
     }
+
+    #[test]
+    fn warmup_begin_day_resets() {
+        let mut tracker = WarmupTracker::default();
+        tracker.curr_min_temp = 10.0;
+        tracker.curr_max_temp = 30.0;
+        tracker.curr_heating_load = 5000.0;
+        tracker.curr_cooling_load = 3000.0;
+
+        tracker.begin_day();
+
+        assert_eq!(tracker.curr_min_temp, f64::MAX);
+        assert_eq!(tracker.curr_max_temp, f64::MIN);
+        assert!((tracker.curr_heating_load - 0.0).abs() < 1e-10);
+        assert!((tracker.curr_cooling_load - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn warmup_update_temperature_tracking() {
+        let mut tracker = WarmupTracker::default();
+        tracker.begin_day();
+
+        tracker.update_temperature(20.0);
+        tracker.update_temperature(25.0);
+        tracker.update_temperature(18.0);
+        tracker.update_temperature(22.0);
+
+        assert!((tracker.curr_min_temp - 18.0).abs() < 1e-10);
+        assert!((tracker.curr_max_temp - 25.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn warmup_update_loads_accumulation() {
+        let mut tracker = WarmupTracker::default();
+        tracker.begin_day();
+
+        tracker.update_loads(1000.0, 500.0);
+        tracker.update_loads(2000.0, 300.0);
+
+        assert!((tracker.curr_heating_load - 3000.0).abs() < 1e-10);
+        assert!((tracker.curr_cooling_load - 800.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn warmup_convergence_tight_tolerance() {
+        let mut tracker = WarmupTracker::default();
+        tracker.required_converged_days = 1;
+
+        // Day 1
+        tracker.begin_day();
+        tracker.update_temperature(20.0);
+        tracker.update_temperature(25.0);
+        tracker.update_loads(1000.0, 500.0);
+        tracker.check_convergence(0.001);
+
+        // Day 2: 0.5% temperature difference (min: 20.0 vs 20.1, max: 25.0 vs 25.125)
+        tracker.begin_day();
+        tracker.update_temperature(20.1);
+        tracker.update_temperature(25.125);
+        tracker.update_loads(1000.0, 500.0);
+        // 0.5% relative diff exceeds 0.1% tolerance
+        assert!(!tracker.check_convergence(0.001));
+    }
+
+    #[test]
+    fn warmup_convergence_fail_tolerance() {
+        let mut tracker = WarmupTracker::default();
+        tracker.required_converged_days = 1;
+
+        // Day 1
+        tracker.begin_day();
+        tracker.update_temperature(20.0);
+        tracker.update_temperature(25.0);
+        tracker.update_loads(1000.0, 500.0);
+        tracker.check_convergence(0.04);
+
+        // Day 2: 5% temperature difference
+        tracker.begin_day();
+        tracker.update_temperature(19.0); // 5% below 20.0
+        tracker.update_temperature(25.0);
+        tracker.update_loads(1000.0, 500.0);
+        // 5% relative diff exceeds 4% tolerance
+        assert!(!tracker.check_convergence(0.04));
+    }
+
+    #[test]
+    fn run_warmup_min_days_enforced() {
+        struct NullCallback;
+        impl SimulationCallback for NullCallback {}
+
+        let config = SimulationConfig {
+            timesteps_per_hour: 1,
+            max_warmup_days: 25,
+            min_warmup_days: 5,
+            warmup_tolerance: 0.04,
+            ..Default::default()
+        };
+
+        let mut state = SimulationState::new(1);
+        let mut callback = NullCallback;
+
+        // NullCallback does nothing, so tracker gets zero loads and zero-ish temps.
+        // Even if convergence could happen early, min_warmup_days must be respected.
+        let warmup_days = run_warmup(&mut state, &mut callback, &config);
+
+        // Must run at least min_warmup_days (5)
+        assert!(warmup_days >= config.min_warmup_days,
+                "warmup ran {} days but min is {}", warmup_days, config.min_warmup_days);
+    }
 }

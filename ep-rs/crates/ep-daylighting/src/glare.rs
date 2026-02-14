@@ -165,4 +165,82 @@ mod tests {
         let p_side = position_factor(PI / 4.0, 0.0);
         assert!(p_center > p_side, "center={p_center}, side={p_side}");
     }
+
+    #[test]
+    fn glare_multiple_sources() {
+        let bg = 200.0;
+        let single_source = vec![GlareSource {
+            luminance: 5000.0,
+            solid_angle: 0.1,
+            position_factor: 0.5,
+        }];
+        let two_sources = vec![
+            GlareSource {
+                luminance: 5000.0,
+                solid_angle: 0.1,
+                position_factor: 0.5,
+            },
+            GlareSource {
+                luminance: 5000.0,
+                solid_angle: 0.1,
+                position_factor: 0.5,
+            },
+        ];
+        let dgi_single = glare_index(&single_source, bg);
+        let dgi_double = glare_index(&two_sources, bg);
+        assert!(dgi_double > dgi_single,
+            "double={dgi_double}, single={dgi_single}");
+    }
+
+    #[test]
+    fn glare_zero_background() {
+        // background_luminance = 0 should return 0.0
+        let sources = vec![GlareSource {
+            luminance: 5000.0,
+            solid_angle: 0.1,
+            position_factor: 0.5,
+        }];
+        let dgi = glare_index(&sources, 0.0);
+        assert!((dgi).abs() < 1e-10, "dgi={dgi}");
+    }
+
+    #[test]
+    fn glare_source_zero_luminance() {
+        let bg = 200.0;
+        // One real source and one zero-luminance source
+        let with_zero = vec![
+            GlareSource {
+                luminance: 5000.0,
+                solid_angle: 0.1,
+                position_factor: 0.5,
+            },
+            GlareSource {
+                luminance: 0.0,
+                solid_angle: 0.1,
+                position_factor: 0.5,
+            },
+        ];
+        let without_zero = vec![GlareSource {
+            luminance: 5000.0,
+            solid_angle: 0.1,
+            position_factor: 0.5,
+        }];
+        let dgi_with = glare_index(&with_zero, bg);
+        let dgi_without = glare_index(&without_zero, bg);
+        // Zero-luminance source should contribute nothing
+        assert!((dgi_with - dgi_without).abs() < 1e-10,
+            "with_zero={dgi_with}, without={dgi_without}");
+    }
+
+    #[test]
+    fn position_factor_boundary() {
+        // total_angle = pi/2 exactly should return 0.0
+        // horizontal = pi/2, vertical = 0 => total_angle = pi/2
+        let p = position_factor(PI / 2.0, 0.0);
+        assert!((p).abs() < 1e-10, "p={p}");
+
+        // Also check with vertical angle
+        let p2 = position_factor(0.0, PI / 2.0);
+        assert!((p2).abs() < 1e-10, "p2={p2}");
+    }
 }

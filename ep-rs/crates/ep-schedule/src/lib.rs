@@ -359,4 +359,413 @@ mod tests {
         assert!(!ScheduleRef::INVALID.is_valid());
         assert!(ScheduleRef(0).is_valid());
     }
+
+    /// Helper: create a default WeekSchedule where all 14 day-type slots use the given DaySchedule.
+    fn uniform_week(day: DaySchedule) -> WeekSchedule {
+        WeekSchedule {
+            days: std::array::from_fn(|_| day.clone()),
+        }
+    }
+
+    /// Helper: build a clock set to a specific date / time.
+    fn clock_at(month: u8, day_of_month: u8, day_of_year: u16, weekday: ep_core::time::Weekday, hour: u8, ts: u8) -> SimulationClock {
+        let mut c = SimulationClock::new(1); // 1 ts/hr for simplicity
+        c.month = month;
+        c.day_of_month = day_of_month;
+        c.day_of_year = day_of_year;
+        c.day_of_week = weekday;
+        c.hour_of_day = hour;
+        c.timestep_in_hour = ts;
+        c
+    }
+
+    // ----- YearSchedule tests -----
+
+    #[test]
+    fn year_schedule_single_week_rule() {
+        let day = DaySchedule::constant(0.8, 1);
+        let week = uniform_week(day);
+        let ys = YearSchedule {
+            name: "test".into(),
+            schedule_type: None,
+            week_rules: vec![WeekRule {
+                start_month: 1,
+                start_day: 1,
+                end_month: 12,
+                end_day: 31,
+                week_schedule: week,
+            }],
+        };
+        let sched = Schedule::Year(ys);
+        let clock = clock_at(6, 15, 166, ep_core::time::Weekday::Wednesday, 10, 0);
+        assert_eq!(sched.value_at(&clock), 0.8);
+    }
+
+    #[test]
+    fn year_schedule_two_week_rules() {
+        let day_winter = DaySchedule::constant(0.3, 1);
+        let day_summer = DaySchedule::constant(0.9, 1);
+        let ys = YearSchedule {
+            name: "seasonal".into(),
+            schedule_type: None,
+            week_rules: vec![
+                WeekRule {
+                    start_month: 1,
+                    start_day: 1,
+                    end_month: 6,
+                    end_day: 30,
+                    week_schedule: uniform_week(day_winter),
+                },
+                WeekRule {
+                    start_month: 7,
+                    start_day: 1,
+                    end_month: 12,
+                    end_day: 31,
+                    week_schedule: uniform_week(day_summer),
+                },
+            ],
+        };
+        let sched = Schedule::Year(ys);
+        // March 15 (winter half)
+        let clock_w = clock_at(3, 15, 74, ep_core::time::Weekday::Friday, 12, 0);
+        assert_eq!(sched.value_at(&clock_w), 0.3);
+        // August 20 (summer half)
+        let clock_s = clock_at(8, 20, 232, ep_core::time::Weekday::Tuesday, 12, 0);
+        assert_eq!(sched.value_at(&clock_s), 0.9);
+    }
+
+    #[test]
+    fn year_schedule_weekday_dispatch() {
+        // Build a WeekSchedule where Monday slot has value 1.0 and Sunday slot has value 0.2
+        let day_mon = DaySchedule::constant(1.0, 1);
+        let day_sun = DaySchedule::constant(0.2, 1);
+        let day_default = DaySchedule::constant(0.5, 1);
+
+        let mut days: [DaySchedule; 14] = std::array::from_fn(|_| day_default.clone());
+        days[day_type::DayType::Monday as usize] = day_mon;
+        days[day_type::DayType::Sunday as usize] = day_sun;
+
+        let ys = YearSchedule {
+            name: "weekday_dispatch".into(),
+            schedule_type: None,
+            week_rules: vec![WeekRule {
+                start_month: 1,
+                start_day: 1,
+                end_month: 12,
+                end_day: 31,
+                week_schedule: WeekSchedule { days },
+            }],
+        };
+        let sched = Schedule::Year(ys);
+        // Monday
+        let clock_mon = clock_at(5, 5, 125, ep_core::time::Weekday::Monday, 8, 0);
+        assert_eq!(sched.value_at(&clock_mon), 1.0);
+        // Sunday
+        let clock_sun = clock_at(5, 4, 124, ep_core::time::Weekday::Sunday, 8, 0);
+        assert_eq!(sched.value_at(&clock_sun), 0.2);
+    }
+
+    #[test]
+    fn year_schedule_no_matching_rule() {
+        let day = DaySchedule::constant(1.0, 1);
+        let ys = YearSchedule {
+            name: "july_only".into(),
+            schedule_type: None,
+            week_rules: vec![WeekRule {
+                start_month: 7,
+                start_day: 1,
+                end_month: 7,
+                end_day: 31,
+                week_schedule: uniform_week(day),
+            }],
+        };
+        let sched = Schedule::Year(ys);
+        // Evaluate in January - no matching rule -> 0.0
+        let clock = clock_at(1, 15, 15, ep_core::time::Weekday::Wednesday, 12, 0);
+        assert_eq!(sched.value_at(&clock), 0.0);
+    }
+
+    #[test]
+    fn year_schedule_bounds() {
+        // Day schedule with values spanning [0.5, 1.0]
+        let day = DaySchedule {
+            values: vec![0.5, 0.7, 1.0, 0.8],
+            interpolation: Interpolation::No,
+        };
+        let ys = YearSchedule {
+            name: "bounded".into(),
+            schedule_type: None,
+            week_rules: vec![WeekRule {
+                start_month: 1,
+                start_day: 1,
+                end_month: 12,
+                end_day: 31,
+                week_schedule: uniform_week(day),
+            }],
+        };
+        let (lo, hi) = ys.bounds();
+        assert_eq!(lo, 0.5);
+        assert_eq!(hi, 1.0);
+    }
+
+    #[test]
+    fn year_schedule_bounds_empty() {
+        let ys = YearSchedule {
+            name: "empty".into(),
+            schedule_type: None,
+            week_rules: vec![],
+        };
+        assert_eq!(ys.bounds(), (0.0, 0.0));
+    }
+
+    // ----- CompactSchedule tests -----
+
+    #[test]
+    fn compact_schedule_alldays() {
+        let cs = CompactSchedule {
+            name: "alldays".into(),
+            schedule_type: None,
+            entries: vec![CompactEntry {
+                through_month: 12,
+                through_day: 31,
+                day_types: vec![day_type::DayType::AllDays],
+                until_values: vec![
+                    (8, 0, 0.0),
+                    (18, 0, 1.0),
+                    (24, 0, 0.5),
+                ],
+            }],
+        };
+        let sched = Schedule::Compact(cs);
+        // 6 AM -> first Until (8:00) covers this -> value 0.0
+        let c1 = clock_at(3, 10, 69, ep_core::time::Weekday::Monday, 6, 0);
+        assert_eq!(sched.value_at(&c1), 0.0);
+        // 12 PM -> second Until (18:00) covers this -> value 1.0
+        let c2 = clock_at(3, 10, 69, ep_core::time::Weekday::Monday, 12, 0);
+        assert_eq!(sched.value_at(&c2), 1.0);
+        // 20 PM -> third Until (24:00) covers this -> value 0.5
+        let c3 = clock_at(3, 10, 69, ep_core::time::Weekday::Monday, 20, 0);
+        assert_eq!(sched.value_at(&c3), 0.5);
+    }
+
+    #[test]
+    fn compact_schedule_weekdays_only() {
+        // CompactSchedule::value_at uses contains() which only matches exact DayType
+        // or AllDays. To target weekdays, list them explicitly.
+        let cs = CompactSchedule {
+            name: "weekdays_only".into(),
+            schedule_type: None,
+            entries: vec![CompactEntry {
+                through_month: 12,
+                through_day: 31,
+                day_types: vec![
+                    day_type::DayType::Monday,
+                    day_type::DayType::Tuesday,
+                    day_type::DayType::Wednesday,
+                    day_type::DayType::Thursday,
+                    day_type::DayType::Friday,
+                ],
+                until_values: vec![(24, 0, 1.0)],
+            }],
+        };
+        let sched = Schedule::Compact(cs);
+        // Tuesday (weekday) -> 1.0
+        let c_tue = clock_at(4, 1, 91, ep_core::time::Weekday::Tuesday, 10, 0);
+        assert_eq!(sched.value_at(&c_tue), 1.0);
+        // Saturday (weekend) -> no match -> 0.0
+        let c_sat = clock_at(4, 5, 95, ep_core::time::Weekday::Saturday, 10, 0);
+        assert_eq!(sched.value_at(&c_sat), 0.0);
+    }
+
+    #[test]
+    fn compact_schedule_two_through_periods() {
+        let cs = CompactSchedule {
+            name: "two_periods".into(),
+            schedule_type: None,
+            entries: vec![
+                CompactEntry {
+                    through_month: 6,
+                    through_day: 30,
+                    day_types: vec![day_type::DayType::AllDays],
+                    until_values: vec![(24, 0, 1.0)],
+                },
+                CompactEntry {
+                    through_month: 12,
+                    through_day: 31,
+                    day_types: vec![day_type::DayType::AllDays],
+                    until_values: vec![(24, 0, 0.5)],
+                },
+            ],
+        };
+        let sched = Schedule::Compact(cs);
+        // March -> first Through (6/30) -> 1.0
+        let c1 = clock_at(3, 1, 60, ep_core::time::Weekday::Friday, 12, 0);
+        assert_eq!(sched.value_at(&c1), 1.0);
+        // September -> second Through (12/31) -> 0.5
+        let c2 = clock_at(9, 1, 244, ep_core::time::Weekday::Monday, 12, 0);
+        assert_eq!(sched.value_at(&c2), 0.5);
+    }
+
+    #[test]
+    fn compact_schedule_bounds() {
+        let cs = CompactSchedule {
+            name: "bounded".into(),
+            schedule_type: None,
+            entries: vec![CompactEntry {
+                through_month: 12,
+                through_day: 31,
+                day_types: vec![day_type::DayType::AllDays],
+                until_values: vec![
+                    (8, 0, 0.0),
+                    (18, 0, 0.5),
+                    (24, 0, 1.0),
+                ],
+            }],
+        };
+        assert_eq!(cs.bounds(), (0.0, 1.0));
+    }
+
+    #[test]
+    fn compact_schedule_bounds_empty() {
+        let cs = CompactSchedule {
+            name: "empty".into(),
+            schedule_type: None,
+            entries: vec![],
+        };
+        assert_eq!(cs.bounds(), (0.0, 0.0));
+    }
+
+    // ----- FileSchedule tests -----
+
+    #[test]
+    fn file_schedule_basic_lookup() {
+        // 24 values (one per hour for day 1), ts_per_hr = 1
+        let values: Vec<f64> = (0..24).map(|h| h as f64 * 10.0).collect();
+        let fs = FileSchedule {
+            name: "file_basic".into(),
+            file_path: "test.csv".into(),
+            values,
+            timesteps_per_hour: 1,
+        };
+        let sched = Schedule::File(fs);
+        // Hour 5 of day 1: index = 0*24 + 5 = 5 -> value 50.0
+        let c = clock_at(1, 1, 1, ep_core::time::Weekday::Monday, 5, 0);
+        assert_eq!(sched.value_at(&c), 50.0);
+    }
+
+    #[test]
+    fn file_schedule_mid_year() {
+        // 365*24 values, one per hour, each = day_of_year as f64
+        let mut values = Vec::with_capacity(365 * 24);
+        for day in 0..365u16 {
+            for _ in 0..24 {
+                values.push((day + 1) as f64);
+            }
+        }
+        let fs = FileSchedule {
+            name: "mid_year".into(),
+            file_path: "test.csv".into(),
+            values,
+            timesteps_per_hour: 1,
+        };
+        // Day 180, hour 0: index = 179*24 + 0 = 4296 -> value 180.0
+        let c = clock_at(6, 29, 180, ep_core::time::Weekday::Saturday, 0, 0);
+        assert_eq!(fs.value_at(&c), 180.0);
+    }
+
+    #[test]
+    fn file_schedule_out_of_bounds() {
+        // Only 10 values
+        let fs = FileSchedule {
+            name: "small".into(),
+            file_path: "test.csv".into(),
+            values: vec![1.0; 10],
+            timesteps_per_hour: 1,
+        };
+        // Day 2, hour 0 -> index = 1*24 + 0 = 24 -> out of bounds -> 0.0
+        let c = clock_at(1, 2, 2, ep_core::time::Weekday::Tuesday, 0, 0);
+        assert_eq!(fs.value_at(&c), 0.0);
+    }
+
+    #[test]
+    fn file_schedule_bounds() {
+        let fs = FileSchedule {
+            name: "bounds".into(),
+            file_path: "test.csv".into(),
+            values: vec![2.0, 5.0, 3.0, 1.0, 4.0],
+            timesteps_per_hour: 1,
+        };
+        assert_eq!(fs.bounds(), (1.0, 5.0));
+    }
+
+    #[test]
+    fn file_schedule_bounds_empty() {
+        let fs = FileSchedule {
+            name: "empty".into(),
+            file_path: "test.csv".into(),
+            values: vec![],
+            timesteps_per_hour: 1,
+        };
+        assert_eq!(fs.bounds(), (0.0, 0.0));
+    }
+
+    // ----- ScheduleManager tests -----
+
+    #[test]
+    fn schedule_manager_invalid_ref() {
+        let mgr = ScheduleManager::new();
+        let clock = SimulationClock::new(1);
+        assert_eq!(mgr.value(ScheduleRef::INVALID, &clock), 0.0);
+    }
+
+    #[test]
+    fn schedule_manager_multiple_types() {
+        let mut mgr = ScheduleManager::new();
+
+        // Constant
+        let r_const = mgr.add(Schedule::Constant(0.42));
+
+        // Year
+        let day = DaySchedule::constant(0.75, 1);
+        let ys = YearSchedule {
+            name: "year".into(),
+            schedule_type: None,
+            week_rules: vec![WeekRule {
+                start_month: 1,
+                start_day: 1,
+                end_month: 12,
+                end_day: 31,
+                week_schedule: uniform_week(day),
+            }],
+        };
+        let r_year = mgr.add(Schedule::Year(ys));
+
+        // Compact
+        let cs = CompactSchedule {
+            name: "compact".into(),
+            schedule_type: None,
+            entries: vec![CompactEntry {
+                through_month: 12,
+                through_day: 31,
+                day_types: vec![day_type::DayType::AllDays],
+                until_values: vec![(24, 0, 0.88)],
+            }],
+        };
+        let r_compact = mgr.add(Schedule::Compact(cs));
+
+        // File
+        let fs = FileSchedule {
+            name: "file".into(),
+            file_path: "test.csv".into(),
+            values: vec![0.33; 365 * 24],
+            timesteps_per_hour: 1,
+        };
+        let r_file = mgr.add(Schedule::File(fs));
+
+        let clock = clock_at(6, 15, 166, ep_core::time::Weekday::Wednesday, 10, 0);
+        assert_eq!(mgr.value(r_const, &clock), 0.42);
+        assert_eq!(mgr.value(r_year, &clock), 0.75);
+        assert_eq!(mgr.value(r_compact, &clock), 0.88);
+        assert_eq!(mgr.value(r_file, &clock), 0.33);
+    }
 }

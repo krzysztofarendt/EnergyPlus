@@ -248,4 +248,101 @@ mod tests {
         let t = window_visible_transmittance(0.8, 0.0);
         assert!((t).abs() < 0.01);
     }
+
+    #[test]
+    fn luminous_efficacy_direct_low_altitude() {
+        // Solar altitude ~5 degrees
+        let alt = 5.0_f64.to_radians();
+        let eff = luminous_efficacy_direct(alt);
+        // At 5 deg: 60 + 5*2.5 = 72.5 lm/W
+        assert!(eff > 60.0 && eff < 85.0, "eff={eff}");
+        assert!((eff - 72.5).abs() < 0.5, "eff={eff}");
+    }
+
+    #[test]
+    fn luminous_efficacy_direct_high_altitude() {
+        // Solar altitude ~70 degrees
+        let alt = 70.0_f64.to_radians();
+        let eff = luminous_efficacy_direct(alt);
+        // At 70 deg: 85 + (70-10)*0.4 = 85 + 24 = 109 lm/W
+        assert!(eff > 100.0 && eff < 120.0, "eff={eff}");
+        assert!((eff - 109.0).abs() < 1.0, "eff={eff}");
+    }
+
+    #[test]
+    fn exterior_illuminance_night() {
+        // When sun altitude <= 0, both direct and diffuse should be zero
+        let (direct, diffuse) = exterior_illuminance_from_radiation(800.0, 200.0, -0.1);
+        assert!((direct).abs() < 1e-10, "direct={direct}");
+        assert!((diffuse).abs() < 1e-10, "diffuse={diffuse}");
+
+        let (direct2, diffuse2) = exterior_illuminance_from_radiation(800.0, 200.0, 0.0);
+        assert!((direct2).abs() < 1e-10, "direct2={direct2}");
+        assert!((diffuse2).abs() < 1e-10, "diffuse2={diffuse2}");
+    }
+
+    #[test]
+    fn exterior_illuminance_clear_vs_overcast() {
+        // Different sky clearness values produce different efficacies
+        let alt = PI / 4.0;
+        // Clear sky efficacy (clearness >= 2.8)
+        let eff_clear = luminous_efficacy_sky(alt, 5.0);
+        // Overcast sky efficacy (clearness < 1.065)
+        let eff_overcast = luminous_efficacy_sky(alt, 1.0);
+        // They should differ meaningfully
+        assert!((eff_clear - eff_overcast).abs() > 5.0,
+            "clear={eff_clear}, overcast={eff_overcast}");
+        // Overcast efficacy is typically higher than clear
+        assert!(eff_overcast > eff_clear,
+            "overcast={eff_overcast} should be > clear={eff_clear}");
+    }
+
+    #[test]
+    fn interior_illuminance_no_sun() {
+        // When direct_normal = 0, only sky contributes
+        let factors = vec![
+            DaylightFactors {
+                sky_factors: [0.01, 0.008, 0.006, 0.004],
+                sun_factor: 0.005,
+                sun_disk_factor: 0.001,
+            },
+        ];
+        let exterior = ExteriorIlluminance {
+            diffuse_horizontal: [20000.0, 18000.0, 15000.0, 10000.0],
+            direct_normal: 0.0,
+            sun_altitude: 0.8,
+        };
+        let illum = interior_illuminance(&factors, &exterior, SkyType::Clear, 1.0);
+        // Sky only: 0.01 * 20000 = 200 lux, sun: 0.005 * 0 = 0
+        assert!((illum - 200.0).abs() < 1.0, "illum={illum}");
+    }
+
+    #[test]
+    fn solid_angle_zero_distance() {
+        // When distance < 0.01, solid angle should be 0
+        let omega = solid_angle(1.0, 0.005, 1.0);
+        assert!((omega).abs() < 1e-10, "omega={omega}");
+        let omega2 = solid_angle(1.0, 0.0, 1.0);
+        assert!((omega2).abs() < 1e-10, "omega2={omega2}");
+    }
+
+    #[test]
+    fn solid_angle_oblique() {
+        // cos_angle = 0.5 should give half of the normal incidence case
+        let omega_normal = solid_angle(1.0, 5.0, 1.0);
+        let omega_oblique = solid_angle(1.0, 5.0, 0.5);
+        assert!((omega_oblique - omega_normal * 0.5).abs() < 1e-10,
+            "normal={omega_normal}, oblique={omega_oblique}");
+    }
+
+    #[test]
+    fn window_transmittance_mid_angle() {
+        // cos_incidence = 0.7 should give a value between 0 and t_normal
+        let t_normal = window_visible_transmittance(0.8, 1.0);
+        let t_mid = window_visible_transmittance(0.8, 0.7);
+        let t_grazing = window_visible_transmittance(0.8, 0.0);
+        assert!(t_mid > t_grazing, "t_mid={t_mid} should be > t_grazing={t_grazing}");
+        assert!(t_mid < t_normal, "t_mid={t_mid} should be < t_normal={t_normal}");
+        assert!(t_mid > 0.0, "t_mid={t_mid} should be positive");
+    }
 }

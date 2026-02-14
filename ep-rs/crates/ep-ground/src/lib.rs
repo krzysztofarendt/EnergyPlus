@@ -306,4 +306,199 @@ mod tests {
         let d2 = soil_diffusivity(SoilType::LightDry);
         assert!(d1 > d2); // Heavy damp has higher diffusivity
     }
+
+    #[test]
+    fn kusuda_negative_depth() {
+        // depth < 0 should return t_mean (early return in temperature())
+        let model = KusudaAchenbach::new(12.0, 15.0, 30.0);
+        for day in [1.0, 90.0, 180.0, 270.0, 365.0] {
+            let t = model.temperature(-1.0, day);
+            assert!(
+                (t - 12.0).abs() < 1e-10,
+                "negative depth should return t_mean, got {t} on day {day}"
+            );
+        }
+    }
+
+    #[test]
+    fn kusuda_zero_diffusivity() {
+        // diffusivity <= 0 should return t_mean for any depth/day
+        let model = KusudaAchenbach {
+            t_mean: 10.0,
+            t_amplitude: 20.0,
+            phase_shift_days: 30.0,
+            soil_diffusivity: 0.0,
+        };
+        for depth in [0.0, 1.0, 5.0, 20.0] {
+            for day in [1.0, 100.0, 200.0, 365.0] {
+                let t = model.temperature(depth, day);
+                assert!(
+                    (t - 10.0).abs() < 1e-10,
+                    "zero diffusivity at depth={depth}, day={day} should return t_mean, got {t}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kusuda_symmetry() {
+        // At the surface, half-year offset from phase_shift should give temperatures
+        // symmetrically above/below t_mean. Specifically:
+        //   at day = phase_shift, cos(0) = 1 → T = t_mean - t_amplitude (minimum)
+        //   at day = phase_shift + 182.5, cos(pi) = -1 → T = t_mean + t_amplitude (maximum)
+        // Average of these two should be t_mean.
+        let model = KusudaAchenbach::new(15.0, 10.0, 45.0);
+        let t_at_shift = model.surface_temperature(45.0);
+        let t_half_year = model.surface_temperature(45.0 + 182.5);
+
+        // t_at_shift ≈ t_mean - t_amplitude = 5.0
+        // t_half_year ≈ t_mean + t_amplitude = 25.0
+        assert!(
+            (t_at_shift - 5.0).abs() < 0.1,
+            "at phase_shift, expected ~5.0 got {t_at_shift}"
+        );
+        assert!(
+            (t_half_year - 25.0).abs() < 0.1,
+            "at phase_shift+182.5, expected ~25.0 got {t_half_year}"
+        );
+        // Their average should be t_mean
+        let avg = (t_at_shift + t_half_year) / 2.0;
+        assert!(
+            (avg - 15.0).abs() < 0.1,
+            "average of symmetric points should be t_mean, got {avg}"
+        );
+    }
+
+    #[test]
+    fn monthly_for_month_boundary() {
+        // month=0 and month=13 should not panic; for_month clamps via saturating_sub and min(11)
+        let temps = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+        let mgt = MonthlyGroundTemperature::new(temps);
+
+        // month=0: saturating_sub(1) → 0, min(11) → 0 → January
+        let t0 = mgt.for_month(0);
+        assert!(
+            (t0 - 1.0).abs() < 1e-10,
+            "month=0 should clamp to January, got {t0}"
+        );
+
+        // month=13: (13-1)=12 as usize, min(11)=11 → December
+        let t13 = mgt.for_month(13);
+        assert!(
+            (t13 - 12.0).abs() < 1e-10,
+            "month=13 should clamp to December, got {t13}"
+        );
+    }
+
+    #[test]
+    fn monthly_for_day_end_of_year() {
+        // day=365 should produce a valid interpolated result without panic
+        let temps = [0.0, 1.0, 3.0, 7.0, 12.0, 17.0, 20.0, 19.0, 15.0, 9.0, 4.0, 1.0];
+        let mgt = MonthlyGroundTemperature::new(temps);
+
+        let t = mgt.for_day(365.0);
+        // Should be a finite number within the range of the temperature data
+        assert!(t.is_finite(), "day=365 should return finite temp, got {t}");
+        assert!(
+            t >= -5.0 && t <= 25.0,
+            "day=365 temperature out of reasonable range: {t}"
+        );
+    }
+
+    #[test]
+    fn monthly_for_day_interpolation() {
+        // Day 15 (mid-January) should interpolate between January and February values
+        let temps = [0.0, 10.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0];
+        let mgt = MonthlyGroundTemperature::new(temps);
+
+        let t = mgt.for_day(15.0);
+        // day=15 → month_frac = (15-1)/30.44 ≈ 0.46
+        // interpolating between temps[0]=0 and temps[1]=10
+        // result should be between 0 and 10
+        assert!(
+            t > 0.0 && t < 10.0,
+            "day 15 should interpolate between Jan(0) and Feb(10), got {t}"
+        );
+    }
+
+    #[test]
+    fn shallow_ground_temp_basic() {
+        // At depth=0.5m, temperature should be within avg ± amplitude range
+        let shallow = ShallowGroundTemperature {
+            depth: 0.5,
+            t_annual_avg: 12.0,
+            t_amplitude: 10.0,
+        };
+        for day in (1..=365).step_by(30) {
+            let t = shallow.temperature(day as f64, 30.0);
+            assert!(
+                t >= 12.0 - 10.0 - 0.5 && t <= 12.0 + 10.0 + 0.5,
+                "shallow temp at day={day} out of range: {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn shallow_ground_temp_surface() {
+        // At depth=0, ShallowGroundTemperature should match KusudaAchenbach surface temperature
+        let shallow = ShallowGroundTemperature {
+            depth: 0.0,
+            t_annual_avg: 12.0,
+            t_amplitude: 15.0,
+        };
+        let kusuda = KusudaAchenbach::new(12.0, 15.0, 30.0);
+
+        for day in (1..=365).step_by(10) {
+            let t_shallow = shallow.temperature(day as f64, 30.0);
+            let t_kusuda = kusuda.surface_temperature(day as f64);
+            assert!(
+                (t_shallow - t_kusuda).abs() < 1e-10,
+                "depth=0 mismatch at day={day}: shallow={t_shallow}, kusuda={t_kusuda}"
+            );
+        }
+    }
+
+    #[test]
+    fn soil_diffusivity_all_types() {
+        // All SoilType variants should return positive diffusivity values
+        let types = [
+            SoilType::HeavyDamp,
+            SoilType::HeavyDry,
+            SoilType::LightDamp,
+            SoilType::LightDry,
+        ];
+        for soil in &types {
+            let d = soil_diffusivity(*soil);
+            assert!(d > 0.0, "diffusivity for {:?} should be > 0, got {}", soil, d);
+        }
+    }
+
+    #[test]
+    fn kusuda_from_monthly_constant() {
+        // 12 months all at 15°C → t_mean=15, amplitude≈0
+        let temps = [15.0; 12];
+        let model = KusudaAchenbach::from_monthly_temperatures(&temps);
+
+        assert!(
+            (model.t_mean - 15.0).abs() < 1e-10,
+            "t_mean should be 15.0, got {}",
+            model.t_mean
+        );
+        assert!(
+            model.t_amplitude.abs() < 1e-10,
+            "t_amplitude should be ~0, got {}",
+            model.t_amplitude
+        );
+
+        // With zero amplitude, temperature at any depth/day should be t_mean
+        for depth in [0.0, 1.0, 5.0] {
+            for day in [1.0, 100.0, 200.0, 365.0] {
+                let t = model.temperature(depth, day);
+                assert!(
+                    (t - 15.0).abs() < 1e-10,
+                    "constant monthly temps at depth={depth}, day={day} should give 15.0, got {t}"
+                );
+            }
+        }
+    }
 }

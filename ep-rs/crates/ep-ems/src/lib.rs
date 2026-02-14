@@ -132,4 +132,115 @@ mod tests {
             _ => panic!("Expected overridden state"),
         }
     }
+
+    #[test]
+    fn ems_update_trends() {
+        let mut mgr = EmsManager::new();
+        let var_idx = mgr.variables.add("trend_var", false);
+        mgr.variables.set(var_idx, ErlValue::Number(77.0));
+        let mut trend = TrendVariable::new("MyTrend", 5);
+        trend.variable_index = Some(var_idx);
+        mgr.trends.push(trend);
+
+        mgr.update_trends();
+
+        assert!((mgr.trends[0].value_at(0).unwrap() - 77.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn ems_execute_at_calling_point() {
+        use crate::program::{ErlExpression, ErlInstruction, ErlKeyword, ErlOp, ErlProgram};
+
+        let mut mgr = EmsManager::new();
+        let var_idx = mgr.variables.add("out", false);
+
+        // Build a program: SET out = 99.0
+        let mut prog = ErlProgram::new("SetOut");
+        let lit_idx = prog.add_literal(99.0);
+        let expr_idx = prog.add_expression(ErlExpression {
+            op: ErlOp::Literal(lit_idx),
+            operands: vec![],
+        });
+        prog.instructions.push(ErlInstruction {
+            keyword: ErlKeyword::Set,
+            arg1: var_idx,
+            arg2: expr_idx,
+        });
+        mgr.programs.push(prog);
+
+        mgr.program_managers.push(ProgramManager {
+            name: "PM1".into(),
+            calling_point: CallingPoint::BeginTimestep,
+            program_indices: vec![0],
+        });
+
+        mgr.execute_at_calling_point(CallingPoint::BeginTimestep);
+        assert!((mgr.variables.get(var_idx).unwrap().as_number() - 99.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn ems_inactive_actuator() {
+        let mut mgr = EmsManager::new();
+        let var_idx = mgr.variables.add("act_var", false);
+        mgr.variables.set(var_idx, ErlValue::Number(50.0));
+        mgr.actuators.push(Actuator {
+            name: "InactiveAct".into(),
+            component_type: "Lights".into(),
+            control_type: "Electricity Rate".into(),
+            variable_index: Some(var_idx),
+            is_active: false,
+            state: ActuatorState::Normal,
+        });
+
+        mgr.execute_at_calling_point(CallingPoint::BeforeHvac);
+        // Actuator is inactive, state should remain Normal
+        assert!(matches!(mgr.actuators[0].state, ActuatorState::Normal));
+    }
+
+    #[test]
+    fn ems_multiple_programs() {
+        use crate::program::{ErlExpression, ErlInstruction, ErlKeyword, ErlOp, ErlProgram};
+
+        let mut mgr = EmsManager::new();
+        let a_idx = mgr.variables.add("a", false);
+        let b_idx = mgr.variables.add("b", false);
+
+        // Program 0: SET a = 10
+        let mut prog0 = ErlProgram::new("SetA");
+        let lit_idx0 = prog0.add_literal(10.0);
+        let expr_idx0 = prog0.add_expression(ErlExpression {
+            op: ErlOp::Literal(lit_idx0),
+            operands: vec![],
+        });
+        prog0.instructions.push(ErlInstruction {
+            keyword: ErlKeyword::Set,
+            arg1: a_idx,
+            arg2: expr_idx0,
+        });
+        mgr.programs.push(prog0);
+
+        // Program 1: SET b = 20
+        let mut prog1 = ErlProgram::new("SetB");
+        let lit_idx1 = prog1.add_literal(20.0);
+        let expr_idx1 = prog1.add_expression(ErlExpression {
+            op: ErlOp::Literal(lit_idx1),
+            operands: vec![],
+        });
+        prog1.instructions.push(ErlInstruction {
+            keyword: ErlKeyword::Set,
+            arg1: b_idx,
+            arg2: expr_idx1,
+        });
+        mgr.programs.push(prog1);
+
+        mgr.program_managers.push(ProgramManager {
+            name: "PM".into(),
+            calling_point: CallingPoint::EndTimestep,
+            program_indices: vec![0, 1],
+        });
+
+        mgr.execute_at_calling_point(CallingPoint::EndTimestep);
+        assert!((mgr.variables.get(a_idx).unwrap().as_number() - 10.0).abs() < 1e-10);
+        assert!((mgr.variables.get(b_idx).unwrap().as_number() - 20.0).abs() < 1e-10);
+    }
 }
