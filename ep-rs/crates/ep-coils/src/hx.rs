@@ -45,6 +45,8 @@ pub struct AirToAirHX {
     pub frost_control_threshold: f64,
     /// Whether economizer bypass is enabled.
     pub economizer_lockout: bool,
+    /// Frost control type.
+    pub frost_control_type: FrostControlType,
 }
 
 /// Heat exchanger calculation result.
@@ -94,6 +96,7 @@ impl AirToAirHX {
             nominal_electric_power: 0.0,
             frost_control_threshold: -23.3,
             economizer_lockout: false,
+            frost_control_type: FrostControlType::None,
         }
     }
 
@@ -119,6 +122,7 @@ impl AirToAirHX {
             nominal_electric_power: 0.0,
             frost_control_threshold: -23.3,
             economizer_lockout: false,
+            frost_control_type: FrostControlType::None,
         }
     }
 
@@ -234,6 +238,201 @@ impl AirToAirHX {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Frost Control
+// ---------------------------------------------------------------------------
+
+/// Frost control strategy for air-to-air heat exchangers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FrostControlType {
+    #[default]
+    /// No frost control.
+    None,
+    /// Limit minimum exhaust air temperature to prevent frost.
+    MinimumExhaustTemp,
+    /// Recirculate exhaust air to preheat supply.
+    ExhaustAirRecirculation,
+    /// Use exhaust air only (bypass supply).
+    ExhaustOnly,
+}
+
+impl AirToAirHX {
+    /// Set frost control parameters.
+    pub fn with_frost_control(mut self, control: FrostControlType, threshold: f64) -> Self {
+        self.frost_control_threshold = threshold;
+        self.frost_control_type = control;
+        self
+    }
+
+    /// Set economizer lockout.
+    pub fn with_economizer_lockout(mut self, lockout: bool) -> Self {
+        self.economizer_lockout = lockout;
+        self
+    }
+
+    /// Calculate with frost control applied.
+    pub fn calculate_with_frost_control(
+        &self,
+        supply_inlet_temp: f64,
+        supply_inlet_w: f64,
+        supply_mass_flow: f64,
+        exhaust_inlet_temp: f64,
+        exhaust_inlet_w: f64,
+        exhaust_mass_flow: f64,
+        economizer_active: bool,
+    ) -> AirToAirHXResult {
+        // Economizer bypass: if lockout enabled and economizer is active, bypass HX
+        if self.economizer_lockout && economizer_active {
+            return AirToAirHXResult {
+                sensible_heat_rate: 0.0,
+                latent_heat_rate: 0.0,
+                total_heat_rate: 0.0,
+                supply_outlet_temp: supply_inlet_temp,
+                supply_outlet_w: supply_inlet_w,
+                exhaust_outlet_temp: exhaust_inlet_temp,
+                exhaust_outlet_w: exhaust_inlet_w,
+                sensible_effectiveness: 0.0,
+                latent_effectiveness: 0.0,
+                electric_power: 0.0,
+            };
+        }
+
+        // First, compute normal result
+        let mut result = self.calculate(
+            supply_inlet_temp, supply_inlet_w, supply_mass_flow,
+            exhaust_inlet_temp, exhaust_inlet_w, exhaust_mass_flow,
+        );
+
+        // Apply frost control
+        match self.frost_control_type {
+            FrostControlType::MinimumExhaustTemp => {
+                // If exhaust outlet drops below threshold, reduce effectiveness
+                if result.exhaust_outlet_temp < self.frost_control_threshold {
+                    // Limit heat transfer to keep exhaust above threshold
+                    let cp = ep_psychrometrics::cp_air(exhaust_inlet_w);
+                    let q_max_frost = exhaust_mass_flow * cp
+                        * (exhaust_inlet_temp - self.frost_control_threshold);
+                    if q_max_frost > 0.0 && result.sensible_heat_rate > q_max_frost {
+                        let ratio = q_max_frost / result.sensible_heat_rate;
+                        result.sensible_heat_rate = q_max_frost;
+                        result.latent_heat_rate *= ratio;
+                        result.total_heat_rate = result.sensible_heat_rate + result.latent_heat_rate;
+                        let cp_sup = ep_psychrometrics::cp_air(supply_inlet_w);
+                        result.supply_outlet_temp = supply_inlet_temp
+                            + result.sensible_heat_rate / (supply_mass_flow * cp_sup).max(1e-10);
+                        result.exhaust_outlet_temp = self.frost_control_threshold;
+                        result.sensible_effectiveness *= ratio;
+                    }
+                }
+            }
+            FrostControlType::ExhaustAirRecirculation => {
+                // If supply inlet is very cold, reduce effective flow
+                if supply_inlet_temp < self.frost_control_threshold {
+                    let ratio = 0.5; // Reduce to 50% effectiveness to prevent frost
+                    result.sensible_heat_rate *= ratio;
+                    result.latent_heat_rate *= ratio;
+                    result.total_heat_rate = result.sensible_heat_rate + result.latent_heat_rate;
+                    let cp_sup = ep_psychrometrics::cp_air(supply_inlet_w);
+                    result.supply_outlet_temp = supply_inlet_temp
+                        + result.sensible_heat_rate / (supply_mass_flow * cp_sup).max(1e-10);
+                    let cp_exh = ep_psychrometrics::cp_air(exhaust_inlet_w);
+                    result.exhaust_outlet_temp = exhaust_inlet_temp
+                        - result.sensible_heat_rate / (exhaust_mass_flow * cp_exh).max(1e-10);
+                    result.sensible_effectiveness *= ratio;
+                }
+            }
+            FrostControlType::ExhaustOnly | FrostControlType::None => {}
+        }
+
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Flat Plate Heat Exchanger (NTU-effectiveness counterflow)
+// ---------------------------------------------------------------------------
+
+/// Flat plate heat exchanger using NTU-effectiveness counterflow model.
+#[derive(Debug, Clone)]
+pub struct FlatPlateHX {
+    pub name: String,
+    /// Overall UA-value (W/K).
+    pub ua: f64,
+}
+
+/// Flat plate HX result.
+#[derive(Debug, Clone, Copy)]
+pub struct FlatPlateHXResult {
+    /// Heat transfer rate (W). Positive = supply gains heat.
+    pub heat_rate: f64,
+    /// Supply outlet temperature (C).
+    pub supply_outlet_temp: f64,
+    /// Exhaust outlet temperature (C).
+    pub exhaust_outlet_temp: f64,
+    /// Effectiveness (0-1).
+    pub effectiveness: f64,
+}
+
+impl FlatPlateHX {
+    pub fn new(name: impl Into<String>, ua: f64) -> Self {
+        Self { name: name.into(), ua }
+    }
+
+    /// Calculate counterflow heat exchanger using NTU-effectiveness method.
+    pub fn calculate(
+        &self,
+        supply_inlet_temp: f64,
+        supply_mass_flow: f64,
+        supply_w: f64,
+        exhaust_inlet_temp: f64,
+        exhaust_mass_flow: f64,
+        exhaust_w: f64,
+    ) -> FlatPlateHXResult {
+        if supply_mass_flow <= 1e-10 || exhaust_mass_flow <= 1e-10 || self.ua <= 0.0 {
+            return FlatPlateHXResult {
+                heat_rate: 0.0,
+                supply_outlet_temp: supply_inlet_temp,
+                exhaust_outlet_temp: exhaust_inlet_temp,
+                effectiveness: 0.0,
+            };
+        }
+
+        let cp_s = ep_psychrometrics::cp_air(supply_w);
+        let cp_e = ep_psychrometrics::cp_air(exhaust_w);
+        let c_supply = supply_mass_flow * cp_s;
+        let c_exhaust = exhaust_mass_flow * cp_e;
+
+        let c_min = c_supply.min(c_exhaust);
+        let c_max = c_supply.max(c_exhaust);
+        let c_ratio = c_min / c_max;
+
+        let ntu = self.ua / c_min;
+
+        // Counterflow effectiveness
+        let effectiveness = if (c_ratio - 1.0).abs() < 1e-10 {
+            // Special case: C_min = C_max
+            ntu / (1.0 + ntu)
+        } else {
+            let exp_term = (-(1.0 - c_ratio) * ntu).exp();
+            (1.0 - exp_term) / (1.0 - c_ratio * exp_term)
+        };
+        let effectiveness = effectiveness.clamp(0.0, 1.0);
+
+        let q_max = c_min * (exhaust_inlet_temp - supply_inlet_temp);
+        let q = effectiveness * q_max;
+
+        let supply_outlet = supply_inlet_temp + q / c_supply;
+        let exhaust_outlet = exhaust_inlet_temp - q / c_exhaust;
+
+        FlatPlateHXResult {
+            heat_rate: q,
+            supply_outlet_temp: supply_outlet,
+            exhaust_outlet_temp: exhaust_outlet,
+            effectiveness,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,5 +530,147 @@ mod tests {
         let result = hx.calculate(-10.0, 0.001, 1.2, 22.0, 0.008, 1.2);
         assert!(result.sensible_effectiveness >= 0.0 && result.sensible_effectiveness <= 1.0,
                 "eff={}", result.sensible_effectiveness);
+    }
+
+    // ====================================================================
+    // Frost Control Tests
+    // ====================================================================
+
+    #[test]
+    fn frost_control_min_exhaust_temp() {
+        let hx = AirToAirHX::plate("FC", 1.0, 0.8)
+            .with_frost_control(FrostControlType::MinimumExhaustTemp, 1.0);
+        // Very cold supply, should limit heat transfer to keep exhaust above 1C
+        let result = hx.calculate_with_frost_control(
+            -30.0, 0.001, 1.2, 22.0, 0.008, 1.2, false,
+        );
+        assert!(result.exhaust_outlet_temp >= 0.5,
+                "Exhaust should stay above threshold: {}", result.exhaust_outlet_temp);
+    }
+
+    #[test]
+    fn frost_control_none_allows_cold_exhaust() {
+        let hx = AirToAirHX::plate("NoFC", 1.0, 0.8);
+        let result = hx.calculate_with_frost_control(
+            -30.0, 0.001, 1.2, 22.0, 0.008, 1.2, false,
+        );
+        // Without frost control, exhaust can get colder
+        assert!(result.exhaust_outlet_temp < 10.0,
+                "Without frost control, exhaust drops: {}", result.exhaust_outlet_temp);
+    }
+
+    #[test]
+    fn frost_control_recirculation() {
+        let hx = AirToAirHX::plate("Recirc", 1.0, 0.8)
+            .with_frost_control(FrostControlType::ExhaustAirRecirculation, -10.0);
+        // Below threshold: effectiveness reduced
+        let result = hx.calculate_with_frost_control(
+            -20.0, 0.001, 1.2, 22.0, 0.008, 1.2, false,
+        );
+        // Compare with no frost control
+        let r_normal = hx.calculate(-20.0, 0.001, 1.2, 22.0, 0.008, 1.2);
+        assert!(result.sensible_heat_rate < r_normal.sensible_heat_rate,
+                "Recirculation should reduce heat transfer: {} vs {}",
+                result.sensible_heat_rate, r_normal.sensible_heat_rate);
+    }
+
+    #[test]
+    fn frost_control_recirculation_above_threshold() {
+        let hx = AirToAirHX::plate("Recirc", 1.0, 0.8)
+            .with_frost_control(FrostControlType::ExhaustAirRecirculation, -10.0);
+        // Above threshold: no reduction
+        let result = hx.calculate_with_frost_control(
+            0.0, 0.003, 1.2, 22.0, 0.008, 1.2, false,
+        );
+        let r_normal = hx.calculate(0.0, 0.003, 1.2, 22.0, 0.008, 1.2);
+        assert!((result.sensible_heat_rate - r_normal.sensible_heat_rate).abs() < 1.0,
+                "Above threshold, should be the same");
+    }
+
+    // ====================================================================
+    // Economizer Lockout Tests
+    // ====================================================================
+
+    #[test]
+    fn economizer_lockout_bypasses_hx() {
+        let hx = AirToAirHX::plate("Lock", 1.0, 0.7)
+            .with_economizer_lockout(true);
+        let result = hx.calculate_with_frost_control(
+            15.0, 0.007, 1.2, 22.0, 0.008, 1.2, true,
+        );
+        assert!(result.sensible_heat_rate.abs() < 1e-10,
+                "Should bypass when economizer active");
+        assert!((result.supply_outlet_temp - 15.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn economizer_lockout_no_bypass_when_inactive() {
+        let hx = AirToAirHX::plate("Lock", 1.0, 0.7)
+            .with_economizer_lockout(true);
+        let result = hx.calculate_with_frost_control(
+            -5.0, 0.002, 1.2, 22.0, 0.008, 1.2, false,
+        );
+        assert!(result.sensible_heat_rate > 0.0,
+                "Should NOT bypass when economizer inactive");
+    }
+
+    #[test]
+    fn no_lockout_allows_hx_with_economizer() {
+        let hx = AirToAirHX::plate("NoLock", 1.0, 0.7);
+        let result = hx.calculate_with_frost_control(
+            15.0, 0.007, 1.2, 22.0, 0.008, 1.2, true,
+        );
+        assert!(result.sensible_heat_rate.abs() > 0.0,
+                "Without lockout, HX operates with economizer");
+    }
+
+    // ====================================================================
+    // Flat Plate HX (NTU-effectiveness) Tests
+    // ====================================================================
+
+    #[test]
+    fn flat_plate_basic() {
+        let hx = FlatPlateHX::new("FP-1", 5000.0);
+        assert!((hx.ua - 5000.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn flat_plate_counterflow_heating() {
+        let hx = FlatPlateHX::new("FP", 3000.0);
+        let result = hx.calculate(-10.0, 1.0, 0.002, 22.0, 1.0, 0.008);
+        assert!(result.heat_rate > 0.0, "Q={}", result.heat_rate);
+        assert!(result.supply_outlet_temp > -10.0);
+        assert!(result.exhaust_outlet_temp < 22.0);
+        assert!(result.effectiveness > 0.0 && result.effectiveness <= 1.0,
+                "eff={}", result.effectiveness);
+    }
+
+    #[test]
+    fn flat_plate_energy_balance() {
+        let hx = FlatPlateHX::new("FP", 2000.0);
+        let result = hx.calculate(5.0, 0.8, 0.003, 22.0, 1.0, 0.008);
+        let cp_s = ep_psychrometrics::cp_air(0.003);
+        let cp_e = ep_psychrometrics::cp_air(0.008);
+        let q_supply = 0.8 * cp_s * (result.supply_outlet_temp - 5.0);
+        let q_exhaust = 1.0 * cp_e * (22.0 - result.exhaust_outlet_temp);
+        assert!((q_supply - q_exhaust).abs() / q_supply.abs().max(1.0) < 0.01,
+                "q_s={}, q_e={}", q_supply, q_exhaust);
+    }
+
+    #[test]
+    fn flat_plate_no_flow() {
+        let hx = FlatPlateHX::new("FP", 3000.0);
+        let result = hx.calculate(-10.0, 0.0, 0.002, 22.0, 1.0, 0.008);
+        assert!(result.heat_rate.abs() < 1e-10);
+        assert!((result.supply_outlet_temp - (-10.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn flat_plate_equal_capacity_rates() {
+        // C_min = C_max, special effectiveness formula
+        let hx = FlatPlateHX::new("FP", 2000.0);
+        let result = hx.calculate(0.0, 1.0, 0.005, 20.0, 1.0, 0.005);
+        assert!(result.effectiveness > 0.0 && result.effectiveness <= 1.0);
+        assert!(result.heat_rate > 0.0);
     }
 }

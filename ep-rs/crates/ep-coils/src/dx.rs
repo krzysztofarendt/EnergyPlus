@@ -387,6 +387,406 @@ pub fn runtime_fraction(plr: f64, plf: f64) -> f64 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Two-Speed DX Cooling Coil
+// ---------------------------------------------------------------------------
+
+/// Two-speed DX cooling coil with separate high/low speed performance.
+#[derive(Debug, Clone)]
+pub struct TwoSpeedDXCoil {
+    pub name: String,
+    /// High-speed rated total cooling capacity (W).
+    pub high_capacity: f64,
+    /// High-speed rated COP.
+    pub high_cop: f64,
+    /// High-speed rated SHR.
+    pub high_shr: f64,
+    /// High-speed rated air flow (m3/s).
+    pub high_air_flow: f64,
+    /// Low-speed rated total cooling capacity (W).
+    pub low_capacity: f64,
+    /// Low-speed rated COP.
+    pub low_cop: f64,
+    /// Low-speed rated SHR.
+    pub low_shr: f64,
+    /// Low-speed rated air flow (m3/s).
+    pub low_air_flow: f64,
+}
+
+/// Two-speed DX coil result.
+#[derive(Debug, Clone, Copy)]
+pub struct TwoSpeedDXResult {
+    /// Total cooling (W).
+    pub total_cooling: f64,
+    /// Sensible cooling (W).
+    pub sensible_cooling: f64,
+    /// Compressor power (W).
+    pub power: f64,
+    /// Outlet temp (C).
+    pub outlet_temp: f64,
+    /// Active speed: 0=off, 1=low, 2=high.
+    pub active_speed: u8,
+    /// Part-load ratio at active speed.
+    pub plr: f64,
+    /// COP at operating conditions.
+    pub cop: f64,
+}
+
+impl TwoSpeedDXCoil {
+    pub fn new(
+        name: impl Into<String>,
+        high_capacity: f64,
+        high_cop: f64,
+        low_capacity: f64,
+        low_cop: f64,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            high_capacity,
+            high_cop,
+            high_shr: 0.75,
+            high_air_flow: 1.0,
+            low_capacity,
+            low_cop,
+            low_shr: 0.80,
+            low_air_flow: 0.5,
+        }
+    }
+
+    /// Calculate two-speed DX coil performance.
+    ///
+    /// `load` — cooling load requested (W, negative = cooling needed).
+    /// `cap_f_temp` — capacity modifier for temperature conditions.
+    pub fn calculate(
+        &self,
+        air_inlet_temp: f64,
+        air_inlet_w: f64,
+        air_mass_flow: f64,
+        load: f64,
+        cap_f_temp: f64,
+    ) -> TwoSpeedDXResult {
+        if air_mass_flow <= 1e-10 || load >= 0.0 {
+            return TwoSpeedDXResult {
+                total_cooling: 0.0, sensible_cooling: 0.0, power: 0.0,
+                outlet_temp: air_inlet_temp, active_speed: 0, plr: 0.0, cop: 0.0,
+            };
+        }
+
+        let abs_load = -load;
+        let low_cap = self.low_capacity * cap_f_temp.max(0.0);
+        let high_cap = self.high_capacity * cap_f_temp.max(0.0);
+
+        let (active_speed, plr, total_cooling, eir, shr) = if abs_load <= low_cap {
+            // Low speed can handle it — cycle at low speed
+            let plr = (abs_load / low_cap).clamp(0.0, 1.0);
+            (1_u8, plr, low_cap * plr, 1.0 / self.low_cop.max(0.01), self.low_shr)
+        } else if abs_load <= high_cap {
+            // Between speeds: run at high speed with PLR
+            let plr = (abs_load / high_cap).clamp(0.0, 1.0);
+            (2, plr, high_cap * plr, 1.0 / self.high_cop.max(0.01), self.high_shr)
+        } else {
+            // Full capacity at high speed
+            (2, 1.0, high_cap, 1.0 / self.high_cop.max(0.01), self.high_shr)
+        };
+
+        let power = total_cooling * eir;
+        let sensible = total_cooling * shr;
+        let cp = ep_psychrometrics::cp_air(air_inlet_w);
+        let outlet_temp = air_inlet_temp - sensible / (air_mass_flow * cp).max(1e-10);
+        let cop = if power > 0.0 { total_cooling / power } else { 0.0 };
+
+        TwoSpeedDXResult {
+            total_cooling, sensible_cooling: sensible, power, outlet_temp,
+            active_speed, plr, cop,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-Speed DX Cooling Coil
+// ---------------------------------------------------------------------------
+
+/// A single speed level for multi-speed DX coils.
+#[derive(Debug, Clone)]
+pub struct DXSpeedLevel {
+    /// Rated total cooling capacity at this speed (W).
+    pub capacity: f64,
+    /// Rated COP at this speed.
+    pub cop: f64,
+    /// Rated SHR at this speed.
+    pub shr: f64,
+    /// Rated air flow rate at this speed (m3/s).
+    pub air_flow: f64,
+}
+
+/// Multi-speed DX cooling coil (up to 4 speeds).
+#[derive(Debug, Clone)]
+pub struct MultiSpeedDXCoil {
+    pub name: String,
+    /// Speed levels (ordered low to high).
+    pub speeds: Vec<DXSpeedLevel>,
+}
+
+/// Multi-speed DX coil result.
+#[derive(Debug, Clone, Copy)]
+pub struct MultiSpeedDXResult {
+    /// Total cooling (W).
+    pub total_cooling: f64,
+    /// Sensible cooling (W).
+    pub sensible_cooling: f64,
+    /// Compressor power (W).
+    pub power: f64,
+    /// Outlet temp (C).
+    pub outlet_temp: f64,
+    /// Active speed index (0-based), or -1 if off.
+    pub active_speed: i8,
+    /// Speed ratio for between-speed interpolation (0-1).
+    pub speed_ratio: f64,
+    /// Part-load ratio at lowest cycling speed.
+    pub cycling_ratio: f64,
+    /// COP at operating conditions.
+    pub cop: f64,
+}
+
+impl MultiSpeedDXCoil {
+    pub fn new(name: impl Into<String>, speeds: Vec<DXSpeedLevel>) -> Self {
+        Self { name: name.into(), speeds }
+    }
+
+    /// Calculate multi-speed DX coil performance.
+    ///
+    /// Speed selection: find lowest speed that meets load.
+    /// If between speeds, interpolate using speed_ratio.
+    pub fn calculate(
+        &self,
+        air_inlet_temp: f64,
+        air_inlet_w: f64,
+        air_mass_flow: f64,
+        load: f64,
+        cap_f_temp: f64,
+    ) -> MultiSpeedDXResult {
+        if air_mass_flow <= 1e-10 || load >= 0.0 || self.speeds.is_empty() {
+            return MultiSpeedDXResult {
+                total_cooling: 0.0, sensible_cooling: 0.0, power: 0.0,
+                outlet_temp: air_inlet_temp, active_speed: -1,
+                speed_ratio: 0.0, cycling_ratio: 0.0, cop: 0.0,
+            };
+        }
+
+        let abs_load = -load;
+        let mod_f = cap_f_temp.max(0.0);
+
+        // Find the lowest speed that can meet the load
+        let mut selected = self.speeds.len() - 1; // default to highest
+        for (i, spd) in self.speeds.iter().enumerate() {
+            if spd.capacity * mod_f >= abs_load {
+                selected = i;
+                break;
+            }
+        }
+
+        let (total_cooling, power, shr, speed_ratio, cycling_ratio);
+
+        if selected == 0 {
+            // Cycling at lowest speed
+            let cap = self.speeds[0].capacity * mod_f;
+            cycling_ratio = (abs_load / cap).clamp(0.0, 1.0);
+            speed_ratio = 0.0;
+            total_cooling = cap * cycling_ratio;
+            let eir = 1.0 / self.speeds[0].cop.max(0.01);
+            power = total_cooling * eir;
+            shr = self.speeds[0].shr;
+        } else {
+            // Between speeds: interpolate
+            let lower = &self.speeds[selected - 1];
+            let upper = &self.speeds[selected];
+            let lower_cap = lower.capacity * mod_f;
+            let upper_cap = upper.capacity * mod_f;
+            speed_ratio = if (upper_cap - lower_cap).abs() > 1e-10 {
+                ((abs_load - lower_cap) / (upper_cap - lower_cap)).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            cycling_ratio = 1.0; // Not cycling between speeds
+
+            total_cooling = lower_cap + speed_ratio * (upper_cap - lower_cap);
+            let lower_eir = 1.0 / lower.cop.max(0.01);
+            let upper_eir = 1.0 / upper.cop.max(0.01);
+            let eir = lower_eir + speed_ratio * (upper_eir - lower_eir);
+            power = total_cooling * eir;
+            shr = lower.shr + speed_ratio * (upper.shr - lower.shr);
+        }
+
+        let sensible = total_cooling * shr;
+        let cp = ep_psychrometrics::cp_air(air_inlet_w);
+        let outlet_temp = air_inlet_temp - sensible / (air_mass_flow * cp).max(1e-10);
+        let cop = if power > 0.0 { total_cooling / power } else { 0.0 };
+
+        MultiSpeedDXResult {
+            total_cooling, sensible_cooling: sensible, power, outlet_temp,
+            active_speed: selected as i8, speed_ratio, cycling_ratio, cop,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-Speed DX Heating Coil (Heat Pump)
+// ---------------------------------------------------------------------------
+
+/// Multi-speed DX heating coil with defrost support.
+#[derive(Debug, Clone)]
+pub struct MultiSpeedDXHeatingCoil {
+    pub name: String,
+    /// Speed levels (ordered low to high).
+    pub speeds: Vec<DXSpeedLevel>,
+    /// Defrost control type.
+    pub defrost_control: DefrostControl,
+    /// Defrost onset temperature (C).
+    pub defrost_onset_temp: f64,
+    /// Maximum defrost time fraction.
+    pub max_defrost_fraction: f64,
+    /// Resistive defrost heater capacity (W).
+    pub resistive_defrost_capacity: f64,
+}
+
+/// Multi-speed DX heating result.
+#[derive(Debug, Clone, Copy)]
+pub struct MultiSpeedDXHeatingResult {
+    /// Heating delivered (W).
+    pub heating_capacity: f64,
+    /// Compressor power (W).
+    pub power: f64,
+    /// Outlet temp (C).
+    pub outlet_temp: f64,
+    /// Active speed index (0-based), or -1 if off.
+    pub active_speed: i8,
+    /// Speed ratio for between-speed interpolation.
+    pub speed_ratio: f64,
+    /// Cycling ratio at lowest speed.
+    pub cycling_ratio: f64,
+    /// COP at operating conditions.
+    pub cop: f64,
+    /// Defrost power (W).
+    pub defrost_power: f64,
+}
+
+impl MultiSpeedDXHeatingCoil {
+    pub fn new(name: impl Into<String>, speeds: Vec<DXSpeedLevel>) -> Self {
+        Self {
+            name: name.into(),
+            speeds,
+            defrost_control: DefrostControl::None,
+            defrost_onset_temp: 5.0,
+            max_defrost_fraction: 0.058,
+            resistive_defrost_capacity: 0.0,
+        }
+    }
+
+    pub fn with_defrost(mut self, control: DefrostControl, onset_temp: f64) -> Self {
+        self.defrost_control = control;
+        self.defrost_onset_temp = onset_temp;
+        self
+    }
+
+    /// Calculate multi-speed heating coil performance.
+    ///
+    /// `load` — heating load (W, positive = heating needed).
+    pub fn calculate(
+        &self,
+        air_inlet_temp: f64,
+        air_inlet_w: f64,
+        air_mass_flow: f64,
+        load: f64,
+        outdoor_temp: f64,
+        cap_f_temp: f64,
+    ) -> MultiSpeedDXHeatingResult {
+        if air_mass_flow <= 1e-10 || load <= 0.0 || self.speeds.is_empty() {
+            return MultiSpeedDXHeatingResult {
+                heating_capacity: 0.0, power: 0.0, outlet_temp: air_inlet_temp,
+                active_speed: -1, speed_ratio: 0.0, cycling_ratio: 0.0,
+                cop: 0.0, defrost_power: 0.0,
+            };
+        }
+
+        // Defrost calculation (reuse DXCoil pattern)
+        let (defrost_power, capacity_reduction) = self.calc_defrost(outdoor_temp);
+
+        let mod_f = cap_f_temp.max(0.0) * (1.0 - capacity_reduction);
+
+        // Find lowest speed that meets load
+        let mut selected = self.speeds.len() - 1;
+        for (i, spd) in self.speeds.iter().enumerate() {
+            if spd.capacity * mod_f >= load {
+                selected = i;
+                break;
+            }
+        }
+
+        let (heating, power, speed_ratio, cycling_ratio);
+
+        if selected == 0 {
+            let cap = self.speeds[0].capacity * mod_f;
+            cycling_ratio = (load / cap).clamp(0.0, 1.0);
+            speed_ratio = 0.0;
+            heating = cap * cycling_ratio;
+            let eir = 1.0 / self.speeds[0].cop.max(0.01);
+            power = heating * eir;
+        } else {
+            let lower = &self.speeds[selected - 1];
+            let upper = &self.speeds[selected];
+            let lower_cap = lower.capacity * mod_f;
+            let upper_cap = upper.capacity * mod_f;
+            speed_ratio = if (upper_cap - lower_cap).abs() > 1e-10 {
+                ((load - lower_cap) / (upper_cap - lower_cap)).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            cycling_ratio = 1.0;
+            heating = lower_cap + speed_ratio * (upper_cap - lower_cap);
+            let lower_eir = 1.0 / lower.cop.max(0.01);
+            let upper_eir = 1.0 / upper.cop.max(0.01);
+            let eir = lower_eir + speed_ratio * (upper_eir - lower_eir);
+            power = heating * eir;
+        }
+
+        let cp = ep_psychrometrics::cp_air(air_inlet_w);
+        let outlet_temp = air_inlet_temp + heating / (air_mass_flow * cp).max(1e-10);
+        let cop = if power > 0.0 { heating / power } else { 0.0 };
+
+        MultiSpeedDXHeatingResult {
+            heating_capacity: heating, power, outlet_temp,
+            active_speed: selected as i8, speed_ratio, cycling_ratio,
+            cop, defrost_power,
+        }
+    }
+
+    fn calc_defrost(&self, outdoor_temp: f64) -> (f64, f64) {
+        if self.defrost_control == DefrostControl::None || outdoor_temp > self.defrost_onset_temp {
+            return (0.0, 0.0);
+        }
+
+        let defrost_fraction = self.max_defrost_fraction
+            * ((self.defrost_onset_temp - outdoor_temp) / self.defrost_onset_temp.abs().max(1.0))
+                .clamp(0.0, 1.0);
+
+        match self.defrost_control {
+            DefrostControl::ReverseCycle => {
+                let max_cap = self.speeds.last().map(|s| s.capacity).unwrap_or(0.0);
+                let max_cop = self.speeds.last().map(|s| s.cop).unwrap_or(3.0);
+                let power = max_cap / max_cop.max(1.0) * defrost_fraction;
+                (power, defrost_fraction)
+            }
+            DefrostControl::Resistive => {
+                (self.resistive_defrost_capacity * defrost_fraction, defrost_fraction * 0.5)
+            }
+            DefrostControl::Timed => {
+                (0.0, defrost_fraction)
+            }
+            DefrostControl::None => (0.0, 0.0),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,5 +998,191 @@ mod tests {
         );
         assert!(result.total_cooling.abs() < 1e-10);
         assert!(result.power.abs() < 1e-10);
+    }
+
+    // ====================================================================
+    // Two-Speed DX Coil Tests
+    // ====================================================================
+
+    #[test]
+    fn two_speed_basic() {
+        let coil = TwoSpeedDXCoil::new("2S", 20000.0, 3.5, 10000.0, 4.0);
+        assert!((coil.high_capacity - 20000.0).abs() < 1e-10);
+        assert!((coil.low_capacity - 10000.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn two_speed_low_speed_cycling() {
+        let coil = TwoSpeedDXCoil::new("2S", 20000.0, 3.5, 10000.0, 4.0);
+        let result = coil.calculate(26.7, 0.010, 0.6, -5000.0, 1.0);
+        assert_eq!(result.active_speed, 1, "Should use low speed");
+        assert!((result.plr - 0.5).abs() < 0.01, "PLR={}", result.plr);
+        assert!((result.total_cooling - 5000.0).abs() < 100.0);
+    }
+
+    #[test]
+    fn two_speed_high_speed() {
+        let coil = TwoSpeedDXCoil::new("2S", 20000.0, 3.5, 10000.0, 4.0);
+        let result = coil.calculate(26.7, 0.010, 0.6, -15000.0, 1.0);
+        assert_eq!(result.active_speed, 2, "Should use high speed");
+        assert!((result.total_cooling - 15000.0).abs() < 100.0);
+    }
+
+    #[test]
+    fn two_speed_off() {
+        let coil = TwoSpeedDXCoil::new("2S", 20000.0, 3.5, 10000.0, 4.0);
+        let result = coil.calculate(26.7, 0.010, 0.6, 0.0, 1.0);
+        assert_eq!(result.active_speed, 0);
+        assert!(result.total_cooling.abs() < 1e-10);
+    }
+
+    #[test]
+    fn two_speed_low_better_cop() {
+        let coil = TwoSpeedDXCoil::new("2S", 20000.0, 3.0, 10000.0, 4.0);
+        let r_low = coil.calculate(26.7, 0.010, 0.6, -8000.0, 1.0);
+        let r_high = coil.calculate(26.7, 0.010, 0.6, -18000.0, 1.0);
+        assert!(r_low.cop > r_high.cop, "Low speed should have better COP: {} vs {}",
+                r_low.cop, r_high.cop);
+    }
+
+    #[test]
+    fn two_speed_cap_limited() {
+        let coil = TwoSpeedDXCoil::new("2S", 20000.0, 3.5, 10000.0, 4.0);
+        let result = coil.calculate(26.7, 0.010, 0.6, -30000.0, 1.0);
+        assert_eq!(result.active_speed, 2);
+        assert!((result.plr - 1.0).abs() < 0.01, "PLR={}", result.plr);
+        assert!((result.total_cooling - 20000.0).abs() < 100.0);
+    }
+
+    #[test]
+    fn two_speed_temp_modifier() {
+        let coil = TwoSpeedDXCoil::new("2S", 20000.0, 3.5, 10000.0, 4.0);
+        let r1 = coil.calculate(26.7, 0.010, 0.6, -20000.0, 1.0);
+        let r2 = coil.calculate(26.7, 0.010, 0.6, -20000.0, 0.8);
+        assert!(r2.total_cooling < r1.total_cooling,
+                "Reduced cap_f_temp should reduce capacity");
+    }
+
+    // ====================================================================
+    // Multi-Speed DX Cooling Coil Tests
+    // ====================================================================
+
+    fn make_4speed_cooling() -> MultiSpeedDXCoil {
+        MultiSpeedDXCoil::new("MS4", vec![
+            DXSpeedLevel { capacity: 5000.0, cop: 4.5, shr: 0.85, air_flow: 0.25 },
+            DXSpeedLevel { capacity: 10000.0, cop: 4.0, shr: 0.80, air_flow: 0.50 },
+            DXSpeedLevel { capacity: 15000.0, cop: 3.5, shr: 0.75, air_flow: 0.75 },
+            DXSpeedLevel { capacity: 20000.0, cop: 3.0, shr: 0.70, air_flow: 1.00 },
+        ])
+    }
+
+    #[test]
+    fn multi_speed_lowest_speed_cycling() {
+        let coil = make_4speed_cooling();
+        let result = coil.calculate(26.7, 0.010, 0.6, -2500.0, 1.0);
+        assert_eq!(result.active_speed, 0, "Should cycle at speed 0");
+        assert!((result.cycling_ratio - 0.5).abs() < 0.01, "CR={}", result.cycling_ratio);
+        assert!((result.total_cooling - 2500.0).abs() < 100.0);
+    }
+
+    #[test]
+    fn multi_speed_between_speeds() {
+        let coil = make_4speed_cooling();
+        // Load 7500W: between speed 0 (5kW) and speed 1 (10kW)
+        let result = coil.calculate(26.7, 0.010, 0.6, -7500.0, 1.0);
+        assert_eq!(result.active_speed, 1, "Should be at speed 1");
+        assert!((result.speed_ratio - 0.5).abs() < 0.01, "SR={}", result.speed_ratio);
+        assert!((result.total_cooling - 7500.0).abs() < 100.0);
+    }
+
+    #[test]
+    fn multi_speed_full_capacity() {
+        let coil = make_4speed_cooling();
+        let result = coil.calculate(26.7, 0.010, 0.6, -20000.0, 1.0);
+        assert_eq!(result.active_speed, 3);
+        assert!((result.total_cooling - 20000.0).abs() < 100.0);
+    }
+
+    #[test]
+    fn multi_speed_exceeds_capacity() {
+        let coil = make_4speed_cooling();
+        let result = coil.calculate(26.7, 0.010, 0.6, -30000.0, 1.0);
+        assert_eq!(result.active_speed, 3);
+        assert!((result.total_cooling - 20000.0).abs() < 100.0, "Q={}", result.total_cooling);
+    }
+
+    #[test]
+    fn multi_speed_cop_decreases_with_speed() {
+        let coil = make_4speed_cooling();
+        let r1 = coil.calculate(26.7, 0.010, 0.6, -4000.0, 1.0);  // speed 0
+        let r2 = coil.calculate(26.7, 0.010, 0.6, -18000.0, 1.0); // speed 3
+        assert!(r1.cop > r2.cop, "Lower speed should have better COP: {} vs {}", r1.cop, r2.cop);
+    }
+
+    #[test]
+    fn multi_speed_off() {
+        let coil = make_4speed_cooling();
+        let result = coil.calculate(26.7, 0.010, 0.6, 0.0, 1.0);
+        assert_eq!(result.active_speed, -1);
+        assert!(result.total_cooling.abs() < 1e-10);
+    }
+
+    // ====================================================================
+    // Multi-Speed DX Heating Coil Tests
+    // ====================================================================
+
+    fn make_2speed_heating() -> MultiSpeedDXHeatingCoil {
+        MultiSpeedDXHeatingCoil::new("MSH", vec![
+            DXSpeedLevel { capacity: 8000.0, cop: 4.0, shr: 1.0, air_flow: 0.5 },
+            DXSpeedLevel { capacity: 16000.0, cop: 3.5, shr: 1.0, air_flow: 1.0 },
+        ])
+    }
+
+    #[test]
+    fn ms_heating_low_speed() {
+        let coil = make_2speed_heating();
+        let result = coil.calculate(15.0, 0.005, 0.8, 4000.0, 10.0, 1.0);
+        assert_eq!(result.active_speed, 0);
+        assert!((result.cycling_ratio - 0.5).abs() < 0.01);
+        assert!((result.heating_capacity - 4000.0).abs() < 100.0);
+        assert!(result.outlet_temp > 15.0);
+    }
+
+    #[test]
+    fn ms_heating_high_speed() {
+        let coil = make_2speed_heating();
+        let result = coil.calculate(15.0, 0.005, 0.8, 12000.0, 10.0, 1.0);
+        assert_eq!(result.active_speed, 1);
+        assert!(result.speed_ratio > 0.0, "SR={}", result.speed_ratio);
+        assert!((result.heating_capacity - 12000.0).abs() < 100.0);
+    }
+
+    #[test]
+    fn ms_heating_with_defrost() {
+        let coil = make_2speed_heating()
+            .with_defrost(DefrostControl::ReverseCycle, 5.0);
+        let result = coil.calculate(15.0, 0.005, 0.8, 12000.0, -5.0, 1.0);
+        assert!(result.defrost_power > 0.0, "defrost_power={}", result.defrost_power);
+        // Capacity reduced by defrost
+        let coil_no_def = make_2speed_heating();
+        let r_no_def = coil_no_def.calculate(15.0, 0.005, 0.8, 12000.0, -5.0, 1.0);
+        assert!(result.heating_capacity <= r_no_def.heating_capacity + 1.0,
+                "Defrost should reduce or maintain capacity");
+    }
+
+    #[test]
+    fn ms_heating_no_defrost_warm() {
+        let coil = make_2speed_heating()
+            .with_defrost(DefrostControl::ReverseCycle, 5.0);
+        let result = coil.calculate(15.0, 0.005, 0.8, 8000.0, 10.0, 1.0);
+        assert!(result.defrost_power.abs() < 1e-10, "No defrost above onset temp");
+    }
+
+    #[test]
+    fn ms_heating_off() {
+        let coil = make_2speed_heating();
+        let result = coil.calculate(15.0, 0.005, 0.8, 0.0, 10.0, 1.0);
+        assert_eq!(result.active_speed, -1);
+        assert!(result.heating_capacity.abs() < 1e-10);
     }
 }

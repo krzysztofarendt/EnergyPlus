@@ -229,6 +229,281 @@ impl UnitarySystem {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Packaged Terminal Air Conditioner (PTAC)
+// ---------------------------------------------------------------------------
+
+/// Packaged terminal air conditioner (PTAC).
+///
+/// Combines DX cooling + heating (electric/gas/HW) + fan + OA mixing
+/// in a through-the-wall package.
+#[derive(Debug, Clone)]
+pub struct PackagedTerminalAC {
+    pub name: String,
+    /// Cooling capacity (W).
+    pub cooling_capacity: f64,
+    /// Cooling COP.
+    pub cooling_cop: f64,
+    /// Heating capacity (W).
+    pub heating_capacity: f64,
+    /// Heating efficiency (1.0 for electric, 0.8 for gas).
+    pub heating_efficiency: f64,
+    /// Fan power (W).
+    pub fan_power: f64,
+    /// Design supply air flow (m3/s).
+    pub supply_air_flow: f64,
+    /// Outdoor air fraction (0-1).
+    pub oa_fraction: f64,
+}
+
+/// PTAC operating mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PTACMode {
+    Off,
+    Cooling,
+    Heating,
+}
+
+/// PTAC result.
+#[derive(Debug, Clone, Copy)]
+pub struct PTACResult {
+    pub mode: PTACMode,
+    /// Cooling delivered (W).
+    pub cooling_rate: f64,
+    /// Heating delivered (W).
+    pub heating_rate: f64,
+    /// Compressor/burner power (W).
+    pub power: f64,
+    /// Fan power (W).
+    pub fan_power: f64,
+    /// Supply temp (C).
+    pub supply_temp: f64,
+    /// PLR.
+    pub plr: f64,
+}
+
+impl PackagedTerminalAC {
+    pub fn new(
+        name: impl Into<String>,
+        cooling_capacity: f64,
+        cooling_cop: f64,
+        heating_capacity: f64,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            cooling_capacity,
+            cooling_cop,
+            heating_capacity,
+            heating_efficiency: 1.0,
+            fan_power: 200.0,
+            supply_air_flow: 0.5,
+            oa_fraction: 0.3,
+        }
+    }
+
+    pub fn with_gas_heat(mut self, efficiency: f64) -> Self {
+        self.heating_efficiency = efficiency.clamp(0.01, 1.0);
+        self
+    }
+
+    /// Calculate PTAC performance.
+    pub fn calculate(
+        &self,
+        zone_temp: f64,
+        zone_load: f64,
+        outdoor_temp: f64,
+        air_density: f64,
+    ) -> PTACResult {
+        let mass_flow = self.supply_air_flow * air_density;
+        let cp = ep_psychrometrics::cp_air(0.008);
+
+        // OA mixing
+        let mixed_temp = self.oa_fraction * outdoor_temp + (1.0 - self.oa_fraction) * zone_temp;
+
+        if zone_load < -100.0 && self.cooling_capacity > 0.0 {
+            let plr = (-zone_load / self.cooling_capacity).clamp(0.0, 1.0);
+            let cooling = self.cooling_capacity * plr;
+            let power = cooling / self.cooling_cop.max(0.01);
+            let supply_temp = mixed_temp - cooling / (mass_flow * cp).max(1e-10);
+            PTACResult {
+                mode: PTACMode::Cooling, cooling_rate: cooling, heating_rate: 0.0,
+                power, fan_power: self.fan_power, supply_temp, plr,
+            }
+        } else if zone_load > 100.0 && self.heating_capacity > 0.0 {
+            let plr = (zone_load / self.heating_capacity).clamp(0.0, 1.0);
+            let heating = self.heating_capacity * plr;
+            let power = heating / self.heating_efficiency.max(0.01);
+            let supply_temp = mixed_temp + heating / (mass_flow * cp).max(1e-10);
+            PTACResult {
+                mode: PTACMode::Heating, cooling_rate: 0.0, heating_rate: heating,
+                power, fan_power: self.fan_power, supply_temp, plr,
+            }
+        } else {
+            PTACResult {
+                mode: PTACMode::Off, cooling_rate: 0.0, heating_rate: 0.0,
+                power: 0.0, fan_power: 0.0, supply_temp: zone_temp, plr: 0.0,
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Packaged Terminal Heat Pump (PTHP)
+// ---------------------------------------------------------------------------
+
+/// Packaged terminal heat pump (PTHP).
+///
+/// DX cooling + DX heating + supplemental electric + fan + OA.
+#[derive(Debug, Clone)]
+pub struct PackagedTerminalHP {
+    pub name: String,
+    /// DX cooling capacity (W).
+    pub cooling_capacity: f64,
+    /// Cooling COP.
+    pub cooling_cop: f64,
+    /// DX heating capacity (W).
+    pub heating_capacity: f64,
+    /// Heating COP.
+    pub heating_cop: f64,
+    /// Supplemental electric heating capacity (W).
+    pub supplemental_capacity: f64,
+    /// Fan power (W).
+    pub fan_power: f64,
+    /// Supply air flow (m3/s).
+    pub supply_air_flow: f64,
+    /// OA fraction.
+    pub oa_fraction: f64,
+    /// Defrost onset temperature (C).
+    pub defrost_onset_temp: f64,
+    /// Minimum compressor outdoor temp (C).
+    pub min_outdoor_temp: f64,
+}
+
+/// PTHP operating mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PTHPMode {
+    Off,
+    Cooling,
+    Heating,
+    SupplementalHeating,
+}
+
+/// PTHP result.
+#[derive(Debug, Clone, Copy)]
+pub struct PTHPResult {
+    pub mode: PTHPMode,
+    pub cooling_rate: f64,
+    pub heating_rate: f64,
+    pub compressor_power: f64,
+    pub supplemental_power: f64,
+    pub fan_power: f64,
+    pub supply_temp: f64,
+    pub plr: f64,
+    pub defrost_active: bool,
+}
+
+impl PackagedTerminalHP {
+    pub fn new(
+        name: impl Into<String>,
+        cooling_capacity: f64,
+        cooling_cop: f64,
+        heating_capacity: f64,
+        heating_cop: f64,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            cooling_capacity, cooling_cop,
+            heating_capacity, heating_cop,
+            supplemental_capacity: 5000.0,
+            fan_power: 200.0,
+            supply_air_flow: 0.5,
+            oa_fraction: 0.3,
+            defrost_onset_temp: 5.0,
+            min_outdoor_temp: -15.0,
+        }
+    }
+
+    pub fn with_supplemental(mut self, capacity: f64) -> Self {
+        self.supplemental_capacity = capacity;
+        self
+    }
+
+    /// Calculate PTHP performance.
+    pub fn calculate(
+        &self,
+        zone_temp: f64,
+        zone_load: f64,
+        outdoor_temp: f64,
+        air_density: f64,
+    ) -> PTHPResult {
+        let mass_flow = self.supply_air_flow * air_density;
+        let cp = ep_psychrometrics::cp_air(0.008);
+        let mixed_temp = self.oa_fraction * outdoor_temp + (1.0 - self.oa_fraction) * zone_temp;
+
+        if zone_load < -100.0 && self.cooling_capacity > 0.0 {
+            let plr = (-zone_load / self.cooling_capacity).clamp(0.0, 1.0);
+            let cooling = self.cooling_capacity * plr;
+            let power = cooling / self.cooling_cop.max(0.01);
+            let supply_temp = mixed_temp - cooling / (mass_flow * cp).max(1e-10);
+            PTHPResult {
+                mode: PTHPMode::Cooling, cooling_rate: cooling, heating_rate: 0.0,
+                compressor_power: power, supplemental_power: 0.0,
+                fan_power: self.fan_power, supply_temp, plr, defrost_active: false,
+            }
+        } else if zone_load > 100.0 && (self.heating_capacity > 0.0 || self.supplemental_capacity > 0.0) {
+            // Defrost reduces HP capacity when cold
+            let defrost_active = outdoor_temp < self.defrost_onset_temp;
+            let defrost_reduction = if defrost_active {
+                0.1 * ((self.defrost_onset_temp - outdoor_temp) / self.defrost_onset_temp.abs().max(1.0)).clamp(0.0, 0.3)
+            } else {
+                0.0
+            };
+
+            let compressor_ok = outdoor_temp >= self.min_outdoor_temp;
+            let available_hp_cap = if compressor_ok {
+                self.heating_capacity * (1.0 - defrost_reduction)
+            } else {
+                0.0
+            };
+
+            let hp_heating = zone_load.min(available_hp_cap);
+            let remaining = (zone_load - hp_heating).max(0.0);
+            let supplemental = remaining.min(self.supplemental_capacity);
+            let total = hp_heating + supplemental;
+
+            let plr = if self.heating_capacity > 0.0 {
+                (hp_heating / self.heating_capacity).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let compressor_power = if compressor_ok && hp_heating > 0.0 {
+                hp_heating / self.heating_cop.max(0.01)
+            } else {
+                0.0
+            };
+            let supply_temp = mixed_temp + total / (mass_flow * cp).max(1e-10);
+
+            let mode = if supplemental > 0.0 {
+                PTHPMode::SupplementalHeating
+            } else {
+                PTHPMode::Heating
+            };
+
+            PTHPResult {
+                mode, cooling_rate: 0.0, heating_rate: total,
+                compressor_power, supplemental_power: supplemental,
+                fan_power: self.fan_power, supply_temp, plr, defrost_active,
+            }
+        } else {
+            PTHPResult {
+                mode: PTHPMode::Off, cooling_rate: 0.0, heating_rate: 0.0,
+                compressor_power: 0.0, supplemental_power: 0.0,
+                fan_power: 0.0, supply_temp: zone_temp, plr: 0.0, defrost_active: false,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +563,127 @@ mod tests {
         let result = sys.calculate(10000.0, 18.0, 0.006, 1.2);
         // Gas furnace: no compressor power in heating
         assert!(result.compressor_power.abs() < 1e-10);
+    }
+
+    // ====================================================================
+    // PTAC Tests
+    // ====================================================================
+
+    #[test]
+    fn ptac_cooling() {
+        let ptac = PackagedTerminalAC::new("PTAC-1", 8000.0, 3.0, 6000.0);
+        let result = ptac.calculate(26.0, -5000.0, 35.0, 1.2);
+        assert_eq!(result.mode, PTACMode::Cooling);
+        assert!((result.cooling_rate - 5000.0).abs() < 100.0);
+        assert!(result.power > 0.0);
+        assert!(result.supply_temp < 26.0);
+    }
+
+    #[test]
+    fn ptac_heating() {
+        let ptac = PackagedTerminalAC::new("PTAC-1", 8000.0, 3.0, 6000.0);
+        let result = ptac.calculate(18.0, 4000.0, -5.0, 1.2);
+        assert_eq!(result.mode, PTACMode::Heating);
+        assert!((result.heating_rate - 4000.0).abs() < 100.0);
+    }
+
+    #[test]
+    fn ptac_off() {
+        let ptac = PackagedTerminalAC::new("PTAC-1", 8000.0, 3.0, 6000.0);
+        let result = ptac.calculate(22.0, 50.0, 25.0, 1.2);
+        assert_eq!(result.mode, PTACMode::Off);
+    }
+
+    #[test]
+    fn ptac_gas_heat() {
+        let ptac = PackagedTerminalAC::new("PTAC-Gas", 8000.0, 3.0, 6000.0)
+            .with_gas_heat(0.80);
+        let result = ptac.calculate(18.0, 6000.0, -5.0, 1.2);
+        // Fuel = 6000 / 0.80 = 7500
+        assert!(result.power > 6000.0, "power={}", result.power);
+    }
+
+    #[test]
+    fn ptac_oa_mixing() {
+        let ptac = PackagedTerminalAC::new("PTAC-OA", 8000.0, 3.0, 6000.0);
+        let result = ptac.calculate(26.0, -8000.0, 35.0, 1.2);
+        // With 30% OA at 35C and 70% return at 26C:
+        // mixed = 0.3*35 + 0.7*26 = 28.7
+        // Supply should be below 28.7
+        assert!(result.supply_temp < 28.7, "T_sup={}", result.supply_temp);
+    }
+
+    #[test]
+    fn ptac_plr_clamped() {
+        let ptac = PackagedTerminalAC::new("PTAC", 8000.0, 3.0, 6000.0);
+        let result = ptac.calculate(26.0, -20000.0, 35.0, 1.2);
+        assert!((result.plr - 1.0).abs() < 0.01);
+        assert!((result.cooling_rate - 8000.0).abs() < 100.0);
+    }
+
+    // ====================================================================
+    // PTHP Tests
+    // ====================================================================
+
+    #[test]
+    fn pthp_cooling() {
+        let pthp = PackagedTerminalHP::new("PTHP-1", 8000.0, 3.5, 7000.0, 3.0);
+        let result = pthp.calculate(26.0, -5000.0, 35.0, 1.2);
+        assert_eq!(result.mode, PTHPMode::Cooling);
+        assert!((result.cooling_rate - 5000.0).abs() < 100.0);
+        assert!(result.compressor_power > 0.0);
+    }
+
+    #[test]
+    fn pthp_heating_mild() {
+        let pthp = PackagedTerminalHP::new("PTHP-1", 8000.0, 3.5, 7000.0, 3.0);
+        let result = pthp.calculate(18.0, 5000.0, 10.0, 1.2);
+        assert_eq!(result.mode, PTHPMode::Heating);
+        assert!((result.heating_rate - 5000.0).abs() < 100.0);
+        assert!(result.supplemental_power.abs() < 1e-10);
+        assert!(!result.defrost_active);
+    }
+
+    #[test]
+    fn pthp_heating_cold_defrost() {
+        let pthp = PackagedTerminalHP::new("PTHP-1", 8000.0, 3.5, 7000.0, 3.0);
+        let result = pthp.calculate(18.0, 5000.0, -5.0, 1.2);
+        assert!(result.defrost_active, "Defrost should be active below onset");
+    }
+
+    #[test]
+    fn pthp_supplemental_needed() {
+        let pthp = PackagedTerminalHP::new("PTHP-1", 8000.0, 3.5, 7000.0, 3.0)
+            .with_supplemental(5000.0);
+        // Load exceeds HP capacity
+        let result = pthp.calculate(18.0, 10000.0, 10.0, 1.2);
+        assert_eq!(result.mode, PTHPMode::SupplementalHeating);
+        assert!(result.supplemental_power > 0.0, "sup={}", result.supplemental_power);
+        assert!((result.heating_rate - 10000.0).abs() < 100.0);
+    }
+
+    #[test]
+    fn pthp_compressor_lockout() {
+        let pthp = PackagedTerminalHP::new("PTHP-1", 8000.0, 3.5, 7000.0, 3.0)
+            .with_supplemental(10000.0);
+        // Below min outdoor temp: HP off, supplemental only
+        let result = pthp.calculate(18.0, 5000.0, -20.0, 1.2);
+        assert!(result.compressor_power.abs() < 1e-10, "HP should be off");
+        assert!(result.supplemental_power > 0.0, "Supplemental should run");
+    }
+
+    #[test]
+    fn pthp_off() {
+        let pthp = PackagedTerminalHP::new("PTHP-1", 8000.0, 3.5, 7000.0, 3.0);
+        let result = pthp.calculate(22.0, 50.0, 25.0, 1.2);
+        assert_eq!(result.mode, PTHPMode::Off);
+    }
+
+    #[test]
+    fn pthp_supply_temp_rises_heating() {
+        let pthp = PackagedTerminalHP::new("PTHP", 8000.0, 3.5, 7000.0, 3.0);
+        let result = pthp.calculate(18.0, 5000.0, 10.0, 1.2);
+        // Mixed temp = 0.3*10 + 0.7*18 = 15.6
+        assert!(result.supply_temp > 15.6, "T_sup={}", result.supply_temp);
     }
 }

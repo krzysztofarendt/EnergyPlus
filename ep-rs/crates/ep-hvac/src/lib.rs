@@ -11,6 +11,7 @@ pub mod air_loop;
 pub mod controller;
 pub mod setpoint;
 pub mod unitary;
+pub mod vrf;
 pub mod zone_equipment;
 
 // ---------------------------------------------------------------------------
@@ -321,5 +322,50 @@ mod integration_tests {
         // Midpoint
         let mid = spm.calculate(15.0);
         assert!(mid > 12.0 && mid < 16.0, "mid={mid}");
+    }
+
+    /// PTAC serving zone: cooling mode with OA mixing
+    #[test]
+    fn ptac_zone_cooling_pipeline() {
+        use crate::unitary::*;
+
+        let ptac = PackagedTerminalAC::new("PTAC-1", 8000.0, 3.5, 6000.0);
+        let zone_temp = 26.0;
+        let outdoor_temp = 35.0;
+        let zone_load = -5000.0;
+
+        let result = ptac.calculate(zone_temp, zone_load, outdoor_temp, 1.2);
+
+        assert!(result.cooling_rate > 0.0, "cooling={}", result.cooling_rate);
+        assert!(result.supply_temp < zone_temp, "T_sup={}", result.supply_temp);
+        assert!(result.power > 0.0);
+        assert!(result.fan_power > 0.0);
+    }
+
+    /// PTHP cold-day supplemental heating pipeline
+    #[test]
+    fn pthp_cold_day_supplemental_pipeline() {
+        use crate::unitary::*;
+
+        let pthp = PackagedTerminalHP::new("PTHP-1", 8000.0, 3.5, 10000.0, 3.0)
+            .with_supplemental(5000.0);
+        let zone_temp = 18.0;
+        let outdoor_temp = -10.0;
+        let zone_load = 8000.0;
+
+        let result = pthp.calculate(zone_temp, zone_load, outdoor_temp, 1.2);
+
+        // Very cold: defrost active, supplemental may kick in
+        assert!(result.heating_rate > 0.0, "heating={}", result.heating_rate);
+        assert!(result.supply_temp > zone_temp, "T_sup={}", result.supply_temp);
+        // Below min_outdoor_temp → compressor off, supplemental only
+        if outdoor_temp < pthp.min_outdoor_temp {
+            assert!(result.supplemental_power > 0.0,
+                "supp={}", result.supplemental_power);
+        } else {
+            // Defrost reduces capacity → supplemental fills gap
+            assert!(result.supplemental_power > 0.0 || result.defrost_active,
+                "supp={} defrost={}", result.supplemental_power, result.defrost_active);
+        }
     }
 }

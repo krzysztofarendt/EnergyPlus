@@ -15,6 +15,9 @@
 
 pub mod boiler;
 pub mod chiller;
+pub mod district;
+pub mod evap_cooler;
+pub mod fluid_hx;
 pub mod ghx;
 pub mod heat_pump;
 pub mod loop_solver;

@@ -170,6 +170,103 @@ impl CoolingTower {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Fluid Cooler (Dry Cooling)
+// ---------------------------------------------------------------------------
+
+/// Fluid cooler speed type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FluidCoolerSpeed {
+    #[default]
+    SingleSpeed,
+    TwoSpeed,
+}
+
+/// Dry fluid cooler (no evaporation, uses outdoor dry-bulb).
+#[derive(Debug, Clone)]
+pub struct FluidCooler {
+    pub name: String,
+    pub speed_type: FluidCoolerSpeed,
+    /// Design UA-value (W/K).
+    pub design_ua: f64,
+    /// Design fan power (W).
+    pub design_fan_power: f64,
+    /// Design water flow rate (kg/s).
+    pub design_water_flow: f64,
+}
+
+/// Fluid cooler result.
+#[derive(Debug, Clone, Copy)]
+pub struct FluidCoolerResult {
+    /// Heat rejection rate (W).
+    pub heat_rejection_rate: f64,
+    /// Water outlet temperature (C).
+    pub outlet_water_temp: f64,
+    /// Fan power (W).
+    pub fan_power: f64,
+}
+
+impl FluidCooler {
+    pub fn new(name: impl Into<String>, design_ua: f64, fan_power: f64, water_flow: f64) -> Self {
+        Self {
+            name: name.into(),
+            speed_type: FluidCoolerSpeed::SingleSpeed,
+            design_ua,
+            design_fan_power: fan_power,
+            design_water_flow: water_flow,
+        }
+    }
+
+    pub fn two_speed(name: impl Into<String>, design_ua: f64, fan_power: f64, water_flow: f64) -> Self {
+        let mut fc = Self::new(name, design_ua, fan_power, water_flow);
+        fc.speed_type = FluidCoolerSpeed::TwoSpeed;
+        fc
+    }
+
+    /// Calculate dry fluid cooler using UA-effectiveness method.
+    pub fn calculate(
+        &self,
+        water_inlet_temp: f64,
+        water_mass_flow: f64,
+        outdoor_db: f64,
+        load: f64,
+    ) -> FluidCoolerResult {
+        if water_mass_flow <= 1e-10 || load <= 0.0 || water_inlet_temp <= outdoor_db {
+            return FluidCoolerResult {
+                heat_rejection_rate: 0.0, outlet_water_temp: water_inlet_temp, fan_power: 0.0,
+            };
+        }
+
+        let cp_w = ep_psychrometrics::cp_water(water_inlet_temp);
+        let c_w = water_mass_flow * cp_w;
+
+        // Simplified: assume air-side capacity >> water-side, so eff = 1 - exp(-UA/C_w)
+        let ntu = self.design_ua / c_w;
+        let eff = 1.0 - (-ntu).exp();
+        let q_max = c_w * (water_inlet_temp - outdoor_db);
+        let q_available = eff * q_max;
+        let q = load.min(q_available);
+
+        let outlet = water_inlet_temp - q / c_w;
+
+        let fan_power = match self.speed_type {
+            FluidCoolerSpeed::SingleSpeed => self.design_fan_power,
+            FluidCoolerSpeed::TwoSpeed => {
+                let load_frac = if q_available > 1e-10 { q / q_available } else { 1.0 };
+                if load_frac > 0.5 {
+                    self.design_fan_power
+                } else {
+                    self.design_fan_power * 0.125
+                }
+            }
+        };
+
+        FluidCoolerResult {
+            heat_rejection_rate: q, outlet_water_temp: outlet, fan_power,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +400,49 @@ mod tests {
             result.fan_power,
             expected_power
         );
+    }
+
+    // ====================================================================
+    // Fluid Cooler Tests
+    // ====================================================================
+
+    #[test]
+    fn fluid_cooler_basic() {
+        let fc = FluidCooler::new("FC-1", 20000.0, 5000.0, 10.0);
+        assert!((fc.design_ua - 20000.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn fluid_cooler_rejects_heat() {
+        let fc = FluidCooler::new("FC", 20000.0, 5000.0, 10.0);
+        let result = fc.calculate(40.0, 10.0, 30.0, 200_000.0);
+        assert!(result.heat_rejection_rate > 0.0, "Q={}", result.heat_rejection_rate);
+        assert!(result.outlet_water_temp < 40.0);
+        assert!(result.outlet_water_temp > 30.0);
+    }
+
+    #[test]
+    fn fluid_cooler_no_load() {
+        let fc = FluidCooler::new("FC", 20000.0, 5000.0, 10.0);
+        let result = fc.calculate(40.0, 10.0, 30.0, 0.0);
+        assert!(result.heat_rejection_rate.abs() < 1e-10);
+        assert!(result.fan_power.abs() < 1e-10);
+    }
+
+    #[test]
+    fn fluid_cooler_two_speed() {
+        let fc = FluidCooler::two_speed("FC-2S", 20000.0, 5000.0, 10.0);
+        let r_high = fc.calculate(40.0, 10.0, 30.0, 500_000.0);
+        let r_low = fc.calculate(40.0, 10.0, 30.0, 10_000.0);
+        assert!((r_high.fan_power - 5000.0).abs() < 1.0);
+        assert!((r_low.fan_power - 5000.0 * 0.125).abs() < 1.0);
+    }
+
+    #[test]
+    fn fluid_cooler_water_below_oa() {
+        // Water colder than outdoor: no cooling possible
+        let fc = FluidCooler::new("FC", 20000.0, 5000.0, 10.0);
+        let result = fc.calculate(25.0, 10.0, 30.0, 100_000.0);
+        assert!(result.heat_rejection_rate.abs() < 1e-10);
     }
 }

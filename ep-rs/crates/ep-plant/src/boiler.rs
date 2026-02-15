@@ -128,6 +128,91 @@ impl Boiler {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Steam Boiler
+// ---------------------------------------------------------------------------
+
+/// Steam boiler — generates steam from water with fuel consumption.
+#[derive(Debug, Clone)]
+pub struct SteamBoiler {
+    pub name: String,
+    pub fuel_type: BoilerFuelType,
+    /// Nominal steam generation capacity (W, thermal).
+    pub nominal_capacity: f64,
+    /// Nominal thermal efficiency (0-1).
+    pub nominal_efficiency: f64,
+    /// Design steam temperature (C).
+    pub design_steam_temp: f64,
+    /// Parasitic electric load (W).
+    pub parasitic_electric: f64,
+}
+
+/// Steam boiler result.
+#[derive(Debug, Clone, Copy)]
+pub struct SteamBoilerResult {
+    /// Steam generation rate (W, thermal).
+    pub steam_rate: f64,
+    /// Fuel consumption (W).
+    pub fuel_rate: f64,
+    /// Electric parasitic power (W).
+    pub electric_power: f64,
+    /// Part-load ratio.
+    pub plr: f64,
+    /// Operating efficiency.
+    pub efficiency: f64,
+}
+
+impl SteamBoiler {
+    pub fn new(
+        name: impl Into<String>,
+        capacity: f64,
+        efficiency: f64,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            fuel_type: BoilerFuelType::NaturalGas,
+            nominal_capacity: capacity,
+            nominal_efficiency: efficiency.clamp(0.01, 1.0),
+            design_steam_temp: 100.0,
+            parasitic_electric: 0.0,
+        }
+    }
+
+    /// Calculate steam boiler performance.
+    ///
+    /// `load` — steam heating load (W, positive).
+    pub fn calculate(
+        &self,
+        load: f64,
+        efficiency_curve: Option<&Curve>,
+    ) -> SteamBoilerResult {
+        if load <= 0.0 || self.nominal_capacity <= 0.0 {
+            return SteamBoilerResult {
+                steam_rate: 0.0, fuel_rate: 0.0, electric_power: 0.0,
+                plr: 0.0, efficiency: self.nominal_efficiency,
+            };
+        }
+
+        let plr = (load / self.nominal_capacity).clamp(0.0, 1.0);
+        let steam_rate = self.nominal_capacity * plr;
+
+        let eff_modifier = match efficiency_curve {
+            Some(curve) => curve.evaluate1(plr).max(0.01),
+            None => 1.0,
+        };
+        let efficiency = (self.nominal_efficiency * eff_modifier).clamp(0.01, 1.0);
+        let fuel_rate = steam_rate / efficiency;
+
+        SteamBoilerResult {
+            steam_rate,
+            fuel_rate,
+            electric_power: self.parasitic_electric * plr,
+            plr,
+            efficiency,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +373,40 @@ mod tests {
             result.outlet_temp
         );
         assert!(result.part_load_ratio.abs() < 1e-10);
+    }
+
+    // ====================================================================
+    // Steam Boiler Tests
+    // ====================================================================
+
+    #[test]
+    fn steam_boiler_basic() {
+        let sb = SteamBoiler::new("STM-1", 500_000.0, 0.85);
+        assert!((sb.nominal_capacity - 500_000.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn steam_boiler_full_load() {
+        let sb = SteamBoiler::new("STM", 500_000.0, 0.85);
+        let result = sb.calculate(500_000.0, None);
+        assert!((result.steam_rate - 500_000.0).abs() < 100.0);
+        assert!((result.plr - 1.0).abs() < 0.01);
+        // fuel = 500000 / 0.85 ≈ 588235
+        assert!(result.fuel_rate > 500_000.0, "fuel={}", result.fuel_rate);
+    }
+
+    #[test]
+    fn steam_boiler_part_load() {
+        let sb = SteamBoiler::new("STM", 500_000.0, 0.85);
+        let result = sb.calculate(250_000.0, None);
+        assert!((result.plr - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn steam_boiler_no_load() {
+        let sb = SteamBoiler::new("STM", 500_000.0, 0.85);
+        let result = sb.calculate(0.0, None);
+        assert!(result.steam_rate.abs() < 1e-10);
+        assert!(result.fuel_rate.abs() < 1e-10);
     }
 }
