@@ -31,6 +31,366 @@ pub struct Chiller {
     pub max_plr: f64,
 }
 
+/// Constant-COP chiller — simplest possible model.
+///
+/// Cooling capacity is unlimited (clamped to load). COP is fixed.
+/// Useful for early testing or as a placeholder.
+#[derive(Debug, Clone)]
+pub struct ConstantCopChiller {
+    pub name: String,
+    /// Fixed COP (W/W).
+    pub cop: f64,
+}
+
+impl ConstantCopChiller {
+    pub fn new(name: impl Into<String>, cop: f64) -> Self {
+        Self {
+            name: name.into(),
+            cop: cop.max(0.01),
+        }
+    }
+
+    /// Calculate at given load and flow conditions.
+    pub fn calculate(
+        &self,
+        evap_inlet_temp: f64,
+        evap_mass_flow: f64,
+        cond_inlet_temp: f64,
+        cond_mass_flow: f64,
+        load: f64,
+    ) -> ChillerResult {
+        if evap_mass_flow <= 1e-10 || load <= 0.0 {
+            return ChillerResult {
+                evap_cooling_rate: 0.0,
+                power: 0.0,
+                cond_heat_rate: 0.0,
+                evap_outlet_temp: evap_inlet_temp,
+                cond_outlet_temp: cond_inlet_temp,
+                part_load_ratio: 0.0,
+                cycling_ratio: 1.0,
+                cop: self.cop,
+            };
+        }
+
+        let evap_cooling = load;
+        let power = evap_cooling / self.cop;
+        let cond_heat = evap_cooling + power;
+
+        let cp_evap = ep_psychrometrics::cp_water(evap_inlet_temp);
+        let evap_outlet_temp = evap_inlet_temp - evap_cooling / (evap_mass_flow * cp_evap);
+
+        let cond_outlet_temp = if cond_mass_flow > 1e-10 {
+            let cp_cond = ep_psychrometrics::cp_water(cond_inlet_temp);
+            cond_inlet_temp + cond_heat / (cond_mass_flow * cp_cond)
+        } else {
+            cond_inlet_temp
+        };
+
+        ChillerResult {
+            evap_cooling_rate: evap_cooling,
+            power,
+            cond_heat_rate: cond_heat,
+            evap_outlet_temp,
+            cond_outlet_temp,
+            part_load_ratio: 1.0,
+            cycling_ratio: 1.0,
+            cop: self.cop,
+        }
+    }
+}
+
+/// Reformulated EIR chiller — uses leaving condenser water temp instead
+/// of entering. More stable for condenser loop iteration.
+///
+/// Same 3-curve approach as standard EIR, but CapFTemp and EIRFTemp use
+/// (T_evap_leaving, T_cond_leaving) as independent variables.
+#[derive(Debug, Clone)]
+pub struct ReformulatedEirChiller {
+    pub name: String,
+    /// Reference cooling capacity (W).
+    pub ref_capacity: f64,
+    /// Reference COP (W/W).
+    pub ref_cop: f64,
+    /// Reference evaporator leaving temp (C).
+    pub ref_evap_leaving_temp: f64,
+    /// Reference condenser leaving temp (C).
+    pub ref_cond_leaving_temp: f64,
+    /// Reference evaporator flow (kg/s).
+    pub ref_evap_flow: f64,
+    /// Reference condenser flow (kg/s).
+    pub ref_cond_flow: f64,
+    /// Minimum PLR.
+    pub min_plr: f64,
+    /// Maximum PLR.
+    pub max_plr: f64,
+}
+
+impl ReformulatedEirChiller {
+    pub fn new(
+        name: impl Into<String>,
+        capacity: f64,
+        cop: f64,
+        ref_evap_flow: f64,
+        ref_cond_flow: f64,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            ref_capacity: capacity,
+            ref_cop: cop,
+            ref_evap_leaving_temp: 6.67,
+            ref_cond_leaving_temp: 35.0,
+            ref_evap_flow,
+            ref_cond_flow,
+            min_plr: 0.1,
+            max_plr: 1.0,
+        }
+    }
+
+    /// Calculate reformulated EIR chiller performance.
+    ///
+    /// Curves use (T_evap_leaving, T_cond_leaving) as independent variables.
+    pub fn calculate(
+        &self,
+        evap_inlet_temp: f64,
+        evap_mass_flow: f64,
+        cond_inlet_temp: f64,
+        cond_mass_flow: f64,
+        load: f64,
+        cap_f_temp: &Curve,
+        eir_f_temp: &Curve,
+        eir_f_plr: &Curve,
+    ) -> ChillerResult {
+        if evap_mass_flow <= 1e-10 || load <= 0.0 || self.ref_capacity <= 0.0 {
+            return ChillerResult {
+                evap_cooling_rate: 0.0,
+                power: 0.0,
+                cond_heat_rate: 0.0,
+                evap_outlet_temp: evap_inlet_temp,
+                cond_outlet_temp: cond_inlet_temp,
+                part_load_ratio: 0.0,
+                cycling_ratio: 0.0,
+                cop: 0.0,
+            };
+        }
+
+        // Use reference leaving temps as initial estimate
+        let evap_leaving = self.ref_evap_leaving_temp;
+        let cond_leaving = self.ref_cond_leaving_temp;
+
+        let cap_modifier = cap_f_temp.evaluate2(evap_leaving, cond_leaving).max(0.0);
+        let available_capacity = self.ref_capacity * cap_modifier;
+
+        if available_capacity <= 0.0 {
+            return ChillerResult {
+                evap_cooling_rate: 0.0,
+                power: 0.0,
+                cond_heat_rate: 0.0,
+                evap_outlet_temp: evap_inlet_temp,
+                cond_outlet_temp: cond_inlet_temp,
+                part_load_ratio: 0.0,
+                cycling_ratio: 0.0,
+                cop: 0.0,
+            };
+        }
+
+        let plr = (load / available_capacity).clamp(0.0, self.max_plr);
+        let evap_cooling = available_capacity * plr;
+
+        let eir_rated = if self.ref_cop > 0.0 { 1.0 / self.ref_cop } else { 0.3 };
+        let eir_temp_modifier = eir_f_temp.evaluate2(evap_leaving, cond_leaving).max(0.0);
+        let eir_plr_modifier = eir_f_plr.evaluate1(plr.max(self.min_plr)).max(0.0);
+
+        let cycling = if plr < self.min_plr {
+            plr / self.min_plr
+        } else {
+            1.0
+        };
+        let power = available_capacity * eir_rated * eir_temp_modifier * eir_plr_modifier * cycling;
+        let cond_heat = evap_cooling + power;
+
+        let cp_evap = ep_psychrometrics::cp_water(evap_inlet_temp);
+        let evap_outlet_temp = evap_inlet_temp - evap_cooling / (evap_mass_flow * cp_evap);
+
+        let cond_outlet_temp = if cond_mass_flow > 1e-10 {
+            let cp_cond = ep_psychrometrics::cp_water(cond_inlet_temp);
+            cond_inlet_temp + cond_heat / (cond_mass_flow * cp_cond)
+        } else {
+            cond_inlet_temp
+        };
+
+        let cop = if power > 0.0 { evap_cooling / power } else { 0.0 };
+
+        ChillerResult {
+            evap_cooling_rate: evap_cooling,
+            power,
+            cond_heat_rate: cond_heat,
+            evap_outlet_temp,
+            cond_outlet_temp,
+            part_load_ratio: plr,
+            cycling_ratio: cycling,
+            cop,
+        }
+    }
+}
+
+/// Single-effect absorption chiller.
+///
+/// Uses generator heat input rather than electric power.
+/// Typical COP ~ 0.7 for single-effect LiBr/water.
+#[derive(Debug, Clone)]
+pub struct AbsorptionChiller {
+    pub name: String,
+    /// Reference cooling capacity (W).
+    pub ref_capacity: f64,
+    /// Reference thermal COP (cooling / generator heat).
+    pub ref_cop: f64,
+    /// Reference evaporator leaving temp (C).
+    pub ref_evap_leaving_temp: f64,
+    /// Reference condenser entering temp (C).
+    pub ref_cond_entering_temp: f64,
+    /// Reference generator entering temp (C).
+    pub ref_generator_temp: f64,
+    /// Reference evaporator flow (kg/s).
+    pub ref_evap_flow: f64,
+    /// Reference condenser flow (kg/s).
+    pub ref_cond_flow: f64,
+    /// Minimum PLR.
+    pub min_plr: f64,
+    /// Pump electric power (W) — parasitic.
+    pub pump_power: f64,
+}
+
+/// Absorption chiller result.
+#[derive(Debug, Clone, Copy)]
+pub struct AbsorptionChillerResult {
+    /// Evaporator cooling rate (W).
+    pub evap_cooling_rate: f64,
+    /// Generator heat input (W).
+    pub generator_heat_rate: f64,
+    /// Condenser heat rejection (W).
+    pub cond_heat_rate: f64,
+    /// Pump electrical power (W).
+    pub pump_power: f64,
+    /// Evaporator outlet temp (C).
+    pub evap_outlet_temp: f64,
+    /// Condenser outlet temp (C).
+    pub cond_outlet_temp: f64,
+    /// Part-load ratio.
+    pub part_load_ratio: f64,
+    /// Thermal COP.
+    pub cop: f64,
+}
+
+impl AbsorptionChiller {
+    pub fn new(
+        name: impl Into<String>,
+        capacity: f64,
+        cop: f64,
+        ref_evap_flow: f64,
+        ref_cond_flow: f64,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            ref_capacity: capacity,
+            ref_cop: cop.max(0.01),
+            ref_evap_leaving_temp: 6.67,
+            ref_cond_entering_temp: 29.44,
+            ref_generator_temp: 116.0,
+            ref_evap_flow,
+            ref_cond_flow,
+            min_plr: 0.15,
+            pump_power: 0.0,
+        }
+    }
+
+    /// Calculate absorption chiller performance.
+    ///
+    /// `cap_f_temp`: capacity modifier = f(T_evap_leaving, T_cond_entering)
+    /// `eir_f_temp`: EIR modifier = f(T_evap_leaving, T_cond_entering)
+    /// `eir_f_plr`: EIR modifier = f(PLR)
+    pub fn calculate(
+        &self,
+        evap_inlet_temp: f64,
+        evap_mass_flow: f64,
+        cond_inlet_temp: f64,
+        cond_mass_flow: f64,
+        load: f64,
+        cap_f_temp: &Curve,
+        eir_f_temp: &Curve,
+        eir_f_plr: &Curve,
+    ) -> AbsorptionChillerResult {
+        let zero = AbsorptionChillerResult {
+            evap_cooling_rate: 0.0,
+            generator_heat_rate: 0.0,
+            cond_heat_rate: 0.0,
+            pump_power: 0.0,
+            evap_outlet_temp: evap_inlet_temp,
+            cond_outlet_temp: cond_inlet_temp,
+            part_load_ratio: 0.0,
+            cop: 0.0,
+        };
+
+        if evap_mass_flow <= 1e-10 || load <= 0.0 || self.ref_capacity <= 0.0 {
+            return zero;
+        }
+
+        let evap_leaving = self.ref_evap_leaving_temp;
+        let cap_modifier = cap_f_temp.evaluate2(evap_leaving, cond_inlet_temp).max(0.0);
+        let available_capacity = self.ref_capacity * cap_modifier;
+
+        if available_capacity <= 0.0 {
+            return zero;
+        }
+
+        let plr = (load / available_capacity).clamp(0.0, 1.0);
+        let evap_cooling = available_capacity * plr;
+
+        // Generator heat input via EIR (thermal basis)
+        let eir_rated = 1.0 / self.ref_cop;
+        let eir_temp_modifier = eir_f_temp.evaluate2(evap_leaving, cond_inlet_temp).max(0.0);
+        let operating_plr = plr.max(self.min_plr);
+        let eir_plr_modifier = eir_f_plr.evaluate1(operating_plr).max(0.0);
+
+        let cycling = if plr < self.min_plr {
+            plr / self.min_plr
+        } else {
+            1.0
+        };
+        let generator_heat = available_capacity * eir_rated * eir_temp_modifier * eir_plr_modifier * cycling;
+
+        // Condenser: Q_cond = Q_evap + Q_gen + Q_pump
+        let pump_power = self.pump_power * cycling;
+        let cond_heat = evap_cooling + generator_heat + pump_power;
+
+        let cp_evap = ep_psychrometrics::cp_water(evap_inlet_temp);
+        let evap_outlet_temp = evap_inlet_temp - evap_cooling / (evap_mass_flow * cp_evap);
+
+        let cond_outlet_temp = if cond_mass_flow > 1e-10 {
+            let cp_cond = ep_psychrometrics::cp_water(cond_inlet_temp);
+            cond_inlet_temp + cond_heat / (cond_mass_flow * cp_cond)
+        } else {
+            cond_inlet_temp
+        };
+
+        let cop = if generator_heat > 0.0 {
+            evap_cooling / generator_heat
+        } else {
+            0.0
+        };
+
+        AbsorptionChillerResult {
+            evap_cooling_rate: evap_cooling,
+            generator_heat_rate: generator_heat,
+            cond_heat_rate: cond_heat,
+            pump_power,
+            evap_outlet_temp,
+            cond_outlet_temp,
+            part_load_ratio: plr,
+            cop,
+        }
+    }
+}
+
 /// Chiller calculation result.
 #[derive(Debug, Clone, Copy)]
 pub struct ChillerResult {
@@ -356,5 +716,133 @@ mod tests {
             "T_cond_out={}, expected 30.0",
             result.cond_outlet_temp
         );
+    }
+
+    // ─── ConstantCopChiller ───
+
+    #[test]
+    fn constant_cop_basic() {
+        let ch = ConstantCopChiller::new("Simple", 5.0);
+        let result = ch.calculate(12.0, 20.0, 30.0, 25.0, 100_000.0);
+
+        assert!((result.evap_cooling_rate - 100_000.0).abs() < 1.0);
+        assert!((result.cop - 5.0).abs() < 0.01);
+        assert!((result.power - 20_000.0).abs() < 1.0, "P={}", result.power);
+    }
+
+    #[test]
+    fn constant_cop_energy_balance() {
+        let ch = ConstantCopChiller::new("Simple", 4.0);
+        let result = ch.calculate(12.0, 20.0, 30.0, 25.0, 200_000.0);
+
+        let balance = (result.cond_heat_rate - result.evap_cooling_rate - result.power).abs();
+        assert!(balance < 1.0, "balance={}", balance);
+    }
+
+    #[test]
+    fn constant_cop_no_load() {
+        let ch = ConstantCopChiller::new("Simple", 4.0);
+        let result = ch.calculate(12.0, 20.0, 30.0, 25.0, 0.0);
+        assert!(result.evap_cooling_rate.abs() < 1e-10);
+        assert!(result.power.abs() < 1e-10);
+    }
+
+    // ─── ReformulatedEirChiller ───
+
+    #[test]
+    fn reformulated_eir_full_load() {
+        let ch = ReformulatedEirChiller::new("Reform", 500_000.0, 5.0, 20.0, 25.0);
+        let (cap_ft, eir_ft, eir_fplr) = flat_curves();
+
+        let result = ch.calculate(
+            12.0, 20.0, 30.0, 25.0, 500_000.0,
+            &cap_ft, &eir_ft, &eir_fplr,
+        );
+
+        assert!((result.evap_cooling_rate - 500_000.0).abs() < 100.0);
+        assert!((result.cop - 5.0).abs() < 0.1, "COP={}", result.cop);
+    }
+
+    #[test]
+    fn reformulated_eir_energy_balance() {
+        let ch = ReformulatedEirChiller::new("Reform", 500_000.0, 5.0, 20.0, 25.0);
+        let (cap_ft, eir_ft, eir_fplr) = flat_curves();
+
+        let result = ch.calculate(
+            12.0, 20.0, 30.0, 25.0, 300_000.0,
+            &cap_ft, &eir_ft, &eir_fplr,
+        );
+
+        let balance = (result.cond_heat_rate - result.evap_cooling_rate - result.power).abs();
+        assert!(balance < 1.0, "balance={}", balance);
+    }
+
+    #[test]
+    fn reformulated_eir_part_load() {
+        let ch = ReformulatedEirChiller::new("Reform", 500_000.0, 5.0, 20.0, 25.0);
+        let (cap_ft, eir_ft, eir_fplr) = flat_curves();
+
+        let result = ch.calculate(
+            12.0, 20.0, 30.0, 25.0, 250_000.0,
+            &cap_ft, &eir_ft, &eir_fplr,
+        );
+
+        assert!((result.part_load_ratio - 0.5).abs() < 0.01, "PLR={}", result.part_load_ratio);
+    }
+
+    // ─── AbsorptionChiller ───
+
+    #[test]
+    fn absorption_chiller_cop() {
+        let ch = AbsorptionChiller::new("Absorb", 500_000.0, 0.7, 20.0, 25.0);
+        let (cap_ft, eir_ft, eir_fplr) = flat_curves();
+
+        let result = ch.calculate(
+            12.0, 20.0, 30.0, 25.0, 500_000.0,
+            &cap_ft, &eir_ft, &eir_fplr,
+        );
+
+        // COP should be approximately 0.7
+        assert!((result.cop - 0.7).abs() < 0.1, "COP={}", result.cop);
+        // Generator heat > cooling output (COP < 1.0)
+        assert!(
+            result.generator_heat_rate > result.evap_cooling_rate,
+            "Q_gen={} should > Q_evap={}",
+            result.generator_heat_rate,
+            result.evap_cooling_rate
+        );
+    }
+
+    #[test]
+    fn absorption_chiller_energy_balance() {
+        let ch = AbsorptionChiller::new("Absorb", 500_000.0, 0.7, 20.0, 25.0);
+        let (cap_ft, eir_ft, eir_fplr) = flat_curves();
+
+        let result = ch.calculate(
+            12.0, 20.0, 30.0, 25.0, 400_000.0,
+            &cap_ft, &eir_ft, &eir_fplr,
+        );
+
+        // Q_cond = Q_evap + Q_gen + Q_pump
+        let balance = (result.cond_heat_rate
+            - result.evap_cooling_rate
+            - result.generator_heat_rate
+            - result.pump_power)
+            .abs();
+        assert!(balance < 1.0, "balance={}", balance);
+    }
+
+    #[test]
+    fn absorption_chiller_no_load() {
+        let ch = AbsorptionChiller::new("Absorb", 500_000.0, 0.7, 20.0, 25.0);
+        let (cap_ft, eir_ft, eir_fplr) = flat_curves();
+
+        let result = ch.calculate(
+            12.0, 20.0, 30.0, 25.0, 0.0,
+            &cap_ft, &eir_ft, &eir_fplr,
+        );
+
+        assert!(result.evap_cooling_rate.abs() < 1e-10);
+        assert!(result.generator_heat_rate.abs() < 1e-10);
     }
 }

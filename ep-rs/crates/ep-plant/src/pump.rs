@@ -167,6 +167,187 @@ impl Pump {
     }
 }
 
+/// Headered pumps — multiple parallel pumps staged on/off based on demand.
+///
+/// Pumps are identical and stage on one at a time as flow demand increases.
+/// Each pump is either fully on or fully off (for constant-speed headers)
+/// or the last pump modulates (for variable-speed headers).
+#[derive(Debug, Clone)]
+pub struct HeaderedPumps {
+    pub name: String,
+    /// Number of parallel pumps.
+    pub num_pumps: usize,
+    /// Pump type (all pumps are identical).
+    pub pump_type: PumpType,
+    /// Design flow rate per pump (m3/s).
+    pub per_pump_flow_rate: f64,
+    /// Design head (Pa) — same for all pumps.
+    pub design_head: f64,
+    /// Rated power per pump (W).
+    pub rated_power_per_pump: f64,
+    /// Motor efficiency (0-1).
+    pub motor_efficiency: f64,
+    /// Fraction of motor heat to fluid (0-1).
+    pub motor_heat_to_fluid: f64,
+    /// Part-load power coefficients for VSD [c0..c3].
+    pub plf_coefficients: [f64; 4],
+    /// Minimum flow fraction for VSD.
+    pub min_flow_fraction: f64,
+}
+
+/// Headered pump calculation result.
+#[derive(Debug, Clone, Copy)]
+pub struct HeaderedPumpResult {
+    /// Total power (W).
+    pub power: f64,
+    /// Total heat to fluid (W).
+    pub heat_to_fluid: f64,
+    /// Total mass flow rate (kg/s).
+    pub mass_flow_rate: f64,
+    /// Temperature rise (C).
+    pub delta_temp: f64,
+    /// Number of pumps running.
+    pub pumps_running: usize,
+}
+
+impl HeaderedPumps {
+    /// Create headered constant-speed pumps.
+    pub fn constant_speed(
+        name: impl Into<String>,
+        num_pumps: usize,
+        per_pump_flow_rate: f64,
+        design_head: f64,
+        motor_efficiency: f64,
+    ) -> Self {
+        let rated = if motor_efficiency > 0.0 {
+            per_pump_flow_rate * design_head / motor_efficiency
+        } else {
+            0.0
+        };
+        Self {
+            name: name.into(),
+            num_pumps: num_pumps.max(1),
+            pump_type: PumpType::ConstantSpeed,
+            per_pump_flow_rate,
+            design_head,
+            rated_power_per_pump: rated,
+            motor_efficiency,
+            motor_heat_to_fluid: 1.0,
+            plf_coefficients: [1.0, 0.0, 0.0, 0.0],
+            min_flow_fraction: 1.0,
+        }
+    }
+
+    /// Create headered variable-speed pumps.
+    pub fn variable_speed(
+        name: impl Into<String>,
+        num_pumps: usize,
+        per_pump_flow_rate: f64,
+        design_head: f64,
+        motor_efficiency: f64,
+        min_flow_fraction: f64,
+    ) -> Self {
+        let rated = if motor_efficiency > 0.0 {
+            per_pump_flow_rate * design_head / motor_efficiency
+        } else {
+            0.0
+        };
+        Self {
+            name: name.into(),
+            num_pumps: num_pumps.max(1),
+            pump_type: PumpType::VariableSpeed,
+            per_pump_flow_rate,
+            design_head,
+            rated_power_per_pump: rated,
+            motor_efficiency,
+            motor_heat_to_fluid: 1.0,
+            plf_coefficients: [0.0015, 0.0233, -0.0506, 1.0258],
+            min_flow_fraction,
+        }
+    }
+
+    /// Calculate headered pump performance.
+    ///
+    /// Stages pumps on/off based on required flow. For constant-speed headers,
+    /// each pump runs at design flow. For variable-speed, the last pump modulates.
+    pub fn calculate(
+        &self,
+        mass_flow_rate: f64,
+        fluid_density: f64,
+        fluid_temp: f64,
+    ) -> HeaderedPumpResult {
+        if mass_flow_rate <= 1e-10 || self.rated_power_per_pump <= 0.0 {
+            return HeaderedPumpResult {
+                power: 0.0,
+                heat_to_fluid: 0.0,
+                mass_flow_rate: 0.0,
+                delta_temp: 0.0,
+                pumps_running: 0,
+            };
+        }
+
+        let per_pump_mass_flow = self.per_pump_flow_rate * fluid_density;
+        let total_design_flow = per_pump_mass_flow * self.num_pumps as f64;
+        let actual_flow = mass_flow_rate.min(total_design_flow);
+
+        // Determine how many pumps to run
+        let pumps_needed = if per_pump_mass_flow > 1e-10 {
+            ((actual_flow / per_pump_mass_flow).ceil() as usize).clamp(1, self.num_pumps)
+        } else {
+            1
+        };
+
+        let total_power;
+
+        match self.pump_type {
+            PumpType::ConstantSpeed => {
+                // Each running pump at full power
+                total_power = self.rated_power_per_pump * pumps_needed as f64;
+            }
+            PumpType::VariableSpeed => {
+                // Full-speed pumps + one modulating pump
+                let full_speed_pumps = if pumps_needed > 1 { pumps_needed - 1 } else { 0 };
+                let remaining_flow = actual_flow - per_pump_mass_flow * full_speed_pumps as f64;
+                let last_pump_plr = if per_pump_mass_flow > 1e-10 {
+                    (remaining_flow / per_pump_mass_flow)
+                        .clamp(self.min_flow_fraction, 1.0)
+                } else {
+                    self.min_flow_fraction
+                };
+
+                let c = &self.plf_coefficients;
+                let frac = c[0]
+                    + c[1] * last_pump_plr
+                    + c[2] * last_pump_plr * last_pump_plr
+                    + c[3] * last_pump_plr * last_pump_plr * last_pump_plr;
+
+                total_power = self.rated_power_per_pump * full_speed_pumps as f64
+                    + self.rated_power_per_pump * frac.max(0.0);
+            }
+        }
+
+        // Heat to fluid
+        let shaft = total_power * self.motor_efficiency;
+        let motor_loss = total_power - shaft;
+        let heat_to_fluid = shaft + motor_loss * self.motor_heat_to_fluid;
+
+        let cp = ep_psychrometrics::cp_water(fluid_temp);
+        let delta_temp = if actual_flow > 1e-10 {
+            heat_to_fluid / (actual_flow * cp)
+        } else {
+            0.0
+        };
+
+        HeaderedPumpResult {
+            power: total_power,
+            heat_to_fluid,
+            mass_flow_rate: actual_flow,
+            delta_temp,
+            pumps_running: pumps_needed,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,6 +460,83 @@ mod tests {
             result.heat_to_fluid.abs() < 1e-10,
             "heat={}",
             result.heat_to_fluid
+        );
+    }
+
+    // ─── HeaderedPumps ───
+
+    #[test]
+    fn headered_cs_one_pump_at_low_flow() {
+        // 3 constant-speed pumps, each 0.01 m3/s
+        let hp = HeaderedPumps::constant_speed("Header", 3, 0.01, 200_000.0, 0.9);
+
+        // Request flow that needs only 1 pump
+        let result = hp.calculate(5.0, 1000.0, 7.0);
+        assert_eq!(result.pumps_running, 1, "pumps={}", result.pumps_running);
+    }
+
+    #[test]
+    fn headered_cs_stages_on() {
+        let hp = HeaderedPumps::constant_speed("Header", 3, 0.01, 200_000.0, 0.9);
+        // per_pump_mass_flow = 0.01 * 1000 = 10 kg/s
+
+        // Low flow → 1 pump
+        let r1 = hp.calculate(5.0, 1000.0, 7.0);
+        assert_eq!(r1.pumps_running, 1);
+
+        // Mid flow → 2 pumps
+        let r2 = hp.calculate(15.0, 1000.0, 7.0);
+        assert_eq!(r2.pumps_running, 2);
+
+        // High flow → 3 pumps
+        let r3 = hp.calculate(25.0, 1000.0, 7.0);
+        assert_eq!(r3.pumps_running, 3);
+    }
+
+    #[test]
+    fn headered_cs_power_scales_with_pumps() {
+        let hp = HeaderedPumps::constant_speed("Header", 3, 0.01, 200_000.0, 0.9);
+
+        let r1 = hp.calculate(5.0, 1000.0, 7.0);
+        let r3 = hp.calculate(25.0, 1000.0, 7.0);
+
+        // 3 pumps running should draw 3x the power of 1 pump
+        assert!(
+            (r3.power - 3.0 * r1.power).abs() < 1.0,
+            "P1={}, P3={}",
+            r1.power,
+            r3.power
+        );
+    }
+
+    #[test]
+    fn headered_vsd_saves_energy() {
+        let hp = HeaderedPumps::variable_speed("VSD-Header", 2, 0.01, 200_000.0, 0.9, 0.1);
+
+        let full = hp.calculate(20.0, 1000.0, 7.0);
+        let half = hp.calculate(5.0, 1000.0, 7.0);
+
+        assert!(half.power < full.power, "full={}, half={}", full.power, half.power);
+    }
+
+    #[test]
+    fn headered_no_flow() {
+        let hp = HeaderedPumps::constant_speed("Header", 3, 0.01, 200_000.0, 0.9);
+        let result = hp.calculate(0.0, 1000.0, 7.0);
+        assert_eq!(result.pumps_running, 0);
+        assert!(result.power.abs() < 1e-10);
+    }
+
+    #[test]
+    fn headered_flow_capped() {
+        let hp = HeaderedPumps::constant_speed("Header", 2, 0.01, 200_000.0, 0.9);
+        // Request more than 2 pumps can deliver (20 kg/s)
+        let result = hp.calculate(30.0, 1000.0, 7.0);
+        assert_eq!(result.pumps_running, 2);
+        assert!(
+            (result.mass_flow_rate - 20.0).abs() < 0.1,
+            "flow={}, expected 20.0",
+            result.mass_flow_rate
         );
     }
 }

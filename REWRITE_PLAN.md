@@ -4,7 +4,7 @@
 
 **Version:** 2.0
 **Date:** 2026-02-14
-**Status:** In Progress — Phases 0–8 Complete, Plant Loop & Simulation Driver Pending
+**Status:** In Progress — Phases 0–9 Complete, Simulation Driver Pending
 
 ---
 
@@ -27,7 +27,7 @@
 
 ## 1. Current State Assessment
 
-The Rust workspace (`ep-rs/`) contains **33 crates** with **1,002 passing tests** and **~39,000 lines of Rust**. Phases 0–8 are complete. The C++ EnergyPlus codebase is **~800K lines** across 200+ modules.
+The Rust workspace (`ep-rs/`) contains **33 crates** with **1,070 passing tests** and **~42,000 lines of Rust**. Phases 0–9 are complete. The C++ EnergyPlus codebase is **~800K lines** across 200+ modules.
 
 ### 1.1 Completed Work
 
@@ -54,7 +54,7 @@ The Rust workspace (`ep-rs/`) contains **33 crates** with **1,002 passing tests*
 | **Node Infrastructure** | ep-nodes | 14 | Complete — node struct, mixer, splitter, OA mixer |
 | **Fans** | ep-fans | 11 | Moderate — constant/variable/on-off; **no detailed performance curves** |
 | **Coils** | ep-coils | 53 | Good — DX (defrost, crankcase, PLF, SHR), water (dry/wet, ε-NTU), heating, HX |
-| **Plant Equipment** | ep-plant | 66 | Moderate — boiler, chiller EIR, tower, pump, mixed tank; **no loop solver** |
+| **Plant Equipment** | ep-plant | 134 | Good — boiler, chillers (EIR/reformulated/absorption/constant-COP), tower, pumps (headered), heat pumps, GHX, stratified tank, ice storage, loop solver |
 | **HVAC Framework** | ep-hvac | 101 | Good — air loop solver, zone equipment dispatch, setpoint managers, OA/PI controllers, terminals |
 | **EMS** | ep-ems | 42 | Good — ERL execution, sensors, actuators, trends  |
 | **FMI** | ep-fmi | 7 | Good — FMI 2.0 co-simulation, variable exchange |
@@ -65,7 +65,7 @@ The Rust workspace (`ep-rs/`) contains **33 crates** with **1,002 passing tests*
 | **API** | ep-api | 6 | Good — C FFI, variable registration, callbacks |
 | **Output** | ep-output | 43 | Good — variables, meters, ESO/MTR/CSV/SQL writers, tabular |
 | **Simulation Driver** | ep-sim | 48 | Good framework — warmup, convergence, sizing; **run loop stubbed** |
-| | | **1,002** | |
+| | | **1,070** | |
 | **Validation** | ep-validation | 21 | Good — BESTEST cases, numerical comparison, regression |
 
 ### 1.2 Key Insight
@@ -88,7 +88,7 @@ These items must be completed before any IDF file can run end-to-end:
 | Shadow casting | Polygon clipping, sunlit fractions | `SolarShading.cc` (13K) | **Done (Phase 7)** |
 | HVAC air loop | Component sequencing, convergence iteration | `SimAirServingZones.cc` (7.8K) | **Done (Phase 8)** |
 | Zone equipment | Load calculation, equipment dispatch | `ZoneEquipmentManager.cc` (7.1K) | **Done (Phase 8)** |
-| Plant loop solver | Half-loop iteration, flow resolution | `Plant/LoopSide.cc` + `PlantManager.cc` (7K) | ~1,200 lines |
+| Plant loop solver | Half-loop iteration, flow resolution | `Plant/LoopSide.cc` + `PlantManager.cc` (7K) | **Done (Phase 9)** |
 | Simulation loop | Environment→Day→Hour→Timestep→HVAC loop | `SimulationManager.cc` (~3K) | ~800 lines |
 | IDF schema | ~50 core object defs (currently ~15) | IDD schema | ~1,500 lines |
 
@@ -532,11 +532,13 @@ Implement the 4 most common terminal types:
 
 ---
 
-## 6. Phase 9: Plant Loop Integration
+## 6. Phase 9: Plant Loop Integration ✅
+
+**Status:** Complete (68 new tests, 1,070 total at completion)
 
 **Goal:** Water-side equipment responds to building loads. A chilled water loop with chiller + pump + cooling coil converges correctly.
 
-**Crates modified:** ep-plant, ep-nodes
+**Crates modified:** ep-plant
 
 ### 6.1 Plant Loop Solver
 
@@ -986,7 +988,7 @@ Expand ep-io to cover remaining ~850 object types with validation.
 | ep-nodes | 14 | — | 20 |
 | ep-fans | 11 | 11 | 25 |
 | ep-coils | 53 | 11 | 60 |
-| ep-plant | 66 | 9, 11 | 120 |
+| ep-plant | 134 | 11 | 150 |
 | ep-hvac | 101 | 11 | 150 |
 | ep-ems | 42 | — | 50 |
 | ep-fmi | 7 | — | 10 |
@@ -999,7 +1001,7 @@ Expand ep-io to cover remaining ~850 object types with validation.
 | ep-api | 6 | — | 10 |
 | ep-output | 43 | 10, 12 | 80 |
 | **ep-comfort** (new) | 0 | 12 | 40 |
-| **Total** | **1,002** | | **~1,700** |
+| **Total** | **1,070** | | **~1,700** |
 
 ---
 
@@ -1012,8 +1014,8 @@ Phase 6 (Heat Balance) ✅ ─────────────────�
 Phase 7 (Solar/Shading) ✅                    │
     │                                         │
     ▼                                         ▼
-Phase 10 (Simulation Driver) ◄── Phase 8 (HVAC) ✅ + Phase 9 (Plant)
-    │                                          [Phase 9 is next]
+Phase 10 (Simulation Driver) ◄── Phase 8 (HVAC) ✅ + Phase 9 (Plant) ✅
+    │                              [Phase 10 is next]
     ▼
 Phase 11 (Equipment Breadth)
     │
@@ -1023,8 +1025,8 @@ Phase 12 (Advanced Features & Parity)
 
 - **Phase 6 → 7:** Complete
 - **Phase 8:** Complete (air-side HVAC integration)
-- **Phase 9:** Next priority (plant loop solver, enhanced chillers, heat pumps, GHX)
-- **Phase 10:** Depends on Phase 9 completing
+- **Phase 9:** Complete (plant loop solver, enhanced chillers, heat pumps, GHX, thermal storage)
+- **Phase 10:** Next priority — depends on Phase 9 (now complete)
 - **Phase 11 ↔ 12:** Can overlap, done incrementally
 
 ### Critical Milestones
@@ -1034,7 +1036,7 @@ Phase 12 (Advanced Features & Parity)
 | Surface temps converge | 6 | Zone energy balance < 1% | ✅ Done |
 | Solar gains correct | 7 | BESTEST 600 solar within 5% | ✅ Done |
 | Single-zone HVAC works | 8 | Zone temp at setpoint under design day | ✅ Done |
-| Plant loop converges | 9 | Chiller/tower energy within 5% | Pending |
+| Plant loop converges | 9 | Chiller/tower energy within 5% | ✅ Done |
 | **First IDF runs end-to-end** | **10** | **BESTEST Case 600 passes** | Pending |
 | 20 example configs work | 11 | Multi-zone VAV systems | Pending |
 | Full BESTEST suite | 12 | 600/900 series all pass | Pending |
