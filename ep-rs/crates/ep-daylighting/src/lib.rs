@@ -9,6 +9,7 @@
 
 pub mod controls;
 pub mod glare;
+pub mod interior;
 pub mod sky;
 
 /// A reference point for daylighting calculations.

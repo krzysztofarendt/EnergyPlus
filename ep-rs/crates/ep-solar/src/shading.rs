@@ -1,7 +1,8 @@
 //! Shadow casting and sunlit fraction calculations.
 //!
 //! Implements polygon clipping for determining the sunlit area of surfaces,
-//! accounting for self-shading and external obstructions.
+//! accounting for self-shading, overhangs, fins, and external obstructions.
+//! Uses Sutherland-Hodgman polygon clipping to compute sunlit fractions.
 
 use ep_surfaces::Vertex;
 
@@ -18,18 +19,214 @@ impl Point2D {
     }
 }
 
+/// Sun position for shadow calculations.
+#[derive(Debug, Clone, Copy)]
+pub struct SunPosition {
+    /// Solar altitude angle (radians, 0 = horizon, PI/2 = zenith).
+    pub altitude: f64,
+    /// Solar azimuth angle (radians, from south, positive west).
+    pub azimuth: f64,
+}
+
+impl SunPosition {
+    pub fn new(altitude: f64, azimuth: f64) -> Self {
+        Self { altitude, azimuth }
+    }
+
+    /// Sun direction vector (unit vector pointing toward the sun).
+    pub fn direction(&self) -> Vertex {
+        let cos_alt = self.altitude.cos();
+        Vertex::new(
+            -cos_alt * self.azimuth.sin(), // x: east-west (positive east)
+            -cos_alt * self.azimuth.cos(), // y: north-south (positive north, negative=south)
+            self.altitude.sin(),            // z: vertical
+        )
+    }
+
+    /// Whether the sun is above the horizon.
+    pub fn is_up(&self) -> bool {
+        self.altitude > 0.0
+    }
+}
+
+/// A shading surface (overhang, fin, detached obstruction).
+#[derive(Debug, Clone)]
+pub struct ShadingSurface {
+    pub name: String,
+    pub vertices: Vec<Vertex>,
+    pub shading_type: ShadingType,
+}
+
+/// Type of shading surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShadingType {
+    /// Detached shading (trees, neighboring buildings).
+    Detached,
+    /// Zone-attached overhang.
+    Overhang,
+    /// Zone-attached vertical fin.
+    Fin,
+    /// Building surface acting as self-shading.
+    Building,
+}
+
+/// Result of sunlit fraction computation for all receiving surfaces.
+#[derive(Debug, Clone)]
+pub struct SunlitResult {
+    /// Sunlit fraction per receiving surface [0.0, 1.0].
+    pub fractions: Vec<f64>,
+}
+
 /// Calculate the sunlit fraction of a surface given shadow polygons.
 ///
 /// Returns a value between 0.0 (fully shaded) and 1.0 (fully sunlit).
-///
-/// # Arguments
-/// * `surface_area` - Total surface area (m2)
-/// * `shadowed_area` - Area in shadow (m2)
 pub fn sunlit_fraction(surface_area: f64, shadowed_area: f64) -> f64 {
     if surface_area <= 0.0 {
         return 0.0;
     }
     (1.0 - shadowed_area / surface_area).clamp(0.0, 1.0)
+}
+
+/// Determine whether a shading surface can potentially shade a receiving surface.
+///
+/// Quick geometric pre-filter based on surface normals and relative position.
+/// Returns false if the shading surface is behind the receiving surface
+/// relative to the sun direction.
+pub fn can_shade(
+    receiving_normal: &Vertex,
+    receiving_centroid: &Vertex,
+    shading_centroid: &Vertex,
+    sun: &SunPosition,
+) -> bool {
+    if !sun.is_up() {
+        return false;
+    }
+
+    let sun_dir = sun.direction();
+
+    // Receiving surface must face the sun (sun dot normal > 0)
+    let face_sun = sun_dir.dot(*receiving_normal);
+    if face_sun <= 0.0 {
+        return false;
+    }
+
+    // Vector from receiving to shading surface
+    let to_shade = shading_centroid.sub(*receiving_centroid);
+
+    // Shading surface must be on the sun-side of the receiving surface
+    // (the shadow caster must be between the sun and the receiver)
+    let shade_along_sun = to_shade.dot(sun_dir);
+    shade_along_sun > 0.0
+}
+
+/// Compute sunlit fractions for multiple receiving surfaces given shading surfaces.
+///
+/// For each receiving surface, projects all relevant shading surfaces onto the
+/// sun plane, clips the shadow polygons against the receiving polygon, and
+/// computes the shadowed area fraction.
+pub fn compute_sunlit_fractions(
+    receiving_vertices: &[Vec<Vertex>],
+    receiving_areas: &[f64],
+    receiving_normals: &[Vertex],
+    receiving_centroids: &[Vertex],
+    shading_surfaces: &[ShadingSurface],
+    sun: &SunPosition,
+) -> SunlitResult {
+    let n = receiving_vertices.len();
+    let mut fractions = vec![1.0; n];
+
+    if !sun.is_up() {
+        return SunlitResult {
+            fractions: vec![0.0; n],
+        };
+    }
+
+    for i in 0..n {
+        if receiving_areas[i] <= 0.0 {
+            fractions[i] = 0.0;
+            continue;
+        }
+
+        // Project receiving surface to sun plane
+        let recv_proj = project_to_sun_plane(&receiving_vertices[i], sun.altitude, sun.azimuth);
+        let recv_area_proj = polygon_area_2d(&recv_proj);
+        if recv_area_proj < 1e-10 {
+            fractions[i] = 0.0;
+            continue;
+        }
+
+        let mut total_shadow_area = 0.0;
+
+        for shade in shading_surfaces {
+            if !can_shade(
+                &receiving_normals[i],
+                &receiving_centroids[i],
+                &centroid_3d(&shade.vertices),
+                sun,
+            ) {
+                continue;
+            }
+
+            // Project shading surface shadow onto the receiving surface plane
+            let shade_proj =
+                project_to_sun_plane(&shade.vertices, sun.altitude, sun.azimuth);
+
+            // Clip shadow polygon against receiving polygon
+            let overlap = clip_polygon(&shade_proj, &recv_proj);
+            if overlap.len() >= 3 {
+                total_shadow_area += polygon_area_2d(&overlap);
+            }
+        }
+
+        fractions[i] = sunlit_fraction(recv_area_proj, total_shadow_area);
+    }
+
+    SunlitResult { fractions }
+}
+
+/// Compute the centroid of a 3D polygon.
+fn centroid_3d(vertices: &[Vertex]) -> Vertex {
+    if vertices.is_empty() {
+        return Vertex::default();
+    }
+    let n = vertices.len() as f64;
+    let sum = vertices.iter().fold(Vertex::default(), |acc, v| acc.add(*v));
+    sum.scale(1.0 / n)
+}
+
+/// Calculate the shadow cast by a vertical fin onto a surface.
+///
+/// Returns the shadowed fraction (0 to 1).
+///
+/// # Arguments
+/// * `fin_depth` - Depth of the fin projection from the wall (m)
+/// * `fin_offset` - Horizontal distance from fin to nearest edge of surface (m)
+/// * `surface_width` - Width of the surface (m)
+/// * `solar_altitude` - Solar altitude angle (radians)
+/// * `solar_azimuth_relative` - Relative azimuth (sun azimuth - surface azimuth, radians)
+pub fn fin_shadow_fraction(
+    fin_depth: f64,
+    fin_offset: f64,
+    surface_width: f64,
+    solar_altitude: f64,
+    solar_azimuth_relative: f64,
+) -> f64 {
+    if solar_altitude <= 0.0 || surface_width <= 0.0 || fin_depth <= 0.0 {
+        return 0.0;
+    }
+
+    let cos_rel_az = solar_azimuth_relative.cos();
+    if cos_rel_az <= 0.0 {
+        return 0.0; // Sun behind surface
+    }
+
+    let sin_rel_az = solar_azimuth_relative.sin();
+    // Shadow width depends on the horizontal profile angle
+    // tan(horizontal_profile) = fin_depth * |sin(relative_azimuth)| / cos(relative_azimuth)
+    let shadow_width = fin_depth * sin_rel_az.abs() / cos_rel_az;
+    let shadow_on_surface = (shadow_width - fin_offset).max(0.0);
+
+    (shadow_on_surface / surface_width).min(1.0)
 }
 
 /// Project a 3D polygon onto a plane perpendicular to the sun direction.
@@ -183,6 +380,7 @@ pub fn overhang_shadow_fraction(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f64::consts::PI;
 
     #[test]
     fn sunlit_fraction_fully_lit() {
@@ -217,7 +415,6 @@ mod tests {
 
     #[test]
     fn clip_polygon_full_overlap() {
-        // Subject fully inside clip
         let subject = vec![
             Point2D::new(1.0, 1.0),
             Point2D::new(4.0, 1.0),
@@ -238,7 +435,6 @@ mod tests {
 
     #[test]
     fn clip_polygon_partial_overlap() {
-        // Subject partially outside clip
         let subject = vec![
             Point2D::new(-1.0, -1.0),
             Point2D::new(3.0, -1.0),
@@ -253,33 +449,184 @@ mod tests {
         ];
         let result = clip_polygon(&subject, &clip);
         let area = polygon_area_2d(&result);
-        // Intersection is 3x3 = 9
         assert!((area - 9.0).abs() < 0.01, "area={area}");
     }
 
     #[test]
+    fn clip_polygon_no_overlap() {
+        let subject = vec![
+            Point2D::new(10.0, 10.0),
+            Point2D::new(12.0, 10.0),
+            Point2D::new(12.0, 12.0),
+            Point2D::new(10.0, 12.0),
+        ];
+        let clip = vec![
+            Point2D::new(0.0, 0.0),
+            Point2D::new(5.0, 0.0),
+            Point2D::new(5.0, 5.0),
+            Point2D::new(0.0, 5.0),
+        ];
+        let result = clip_polygon(&subject, &clip);
+        assert!(result.is_empty() || polygon_area_2d(&result) < 1e-10);
+    }
+
+    #[test]
     fn overhang_shadow_high_sun() {
-        // Sun at 60° altitude, directly facing surface
         let frac = overhang_shadow_fraction(
-            1.0,   // 1m overhang
-            0.0,   // No offset
-            2.0,   // 2m surface height
+            1.0,
+            0.0,
+            2.0,
             60.0_f64.to_radians(),
-            0.0,   // Sun directly facing surface
+            0.0,
         );
-        // Shadow depth = 1.0 / tan(60°) ≈ 0.577m
+        // Shadow depth = 1.0 / tan(60°) ≈ 0.577m on 2m surface
         assert!(frac > 0.2 && frac < 0.35, "frac={frac}");
     }
 
     #[test]
     fn overhang_no_shadow_sun_behind() {
         let frac = overhang_shadow_fraction(
-            1.0,
-            0.0,
-            2.0,
+            1.0, 0.0, 2.0,
             45.0_f64.to_radians(),
-            std::f64::consts::PI, // Sun behind surface
+            PI,
         );
-        assert!((frac).abs() < 1e-10);
+        assert!(frac.abs() < 1e-10);
+    }
+
+    #[test]
+    fn overhang_shadow_with_offset() {
+        // Overhang 0.5m above window top, 0.8m deep, 1.5m surface
+        let frac = overhang_shadow_fraction(
+            0.8, 0.5, 1.5,
+            45.0_f64.to_radians(),
+            0.0,
+        );
+        // Shadow depth = 0.8 / tan(45°) = 0.8m, minus 0.5m offset = 0.3m on 1.5m
+        assert!((frac - 0.2).abs() < 0.05, "frac={frac}");
+    }
+
+    #[test]
+    fn fin_shadow_sun_directly_facing() {
+        // Sun directly facing surface (relative_azimuth = 0) → no fin shadow
+        let frac = fin_shadow_fraction(
+            1.0, 0.0, 3.0,
+            45.0_f64.to_radians(),
+            0.0,
+        );
+        assert!(frac.abs() < 1e-10, "frac={frac}");
+    }
+
+    #[test]
+    fn fin_shadow_oblique_sun() {
+        // Sun 30° off normal, 1m deep fin, 3m wide surface
+        let frac = fin_shadow_fraction(
+            1.0, 0.0, 3.0,
+            45.0_f64.to_radians(),
+            30.0_f64.to_radians(),
+        );
+        // shadow_width = 1.0 * sin(30°) / cos(30°) = tan(30°) ≈ 0.577m on 3m
+        assert!(frac > 0.15 && frac < 0.25, "frac={frac}");
+    }
+
+    #[test]
+    fn fin_shadow_sun_behind() {
+        let frac = fin_shadow_fraction(
+            1.0, 0.0, 3.0,
+            45.0_f64.to_radians(),
+            PI,
+        );
+        assert!(frac.abs() < 1e-10);
+    }
+
+    #[test]
+    fn sun_position_direction_vector() {
+        // Sun at zenith: direction should be (0, 0, 1)
+        let sun = SunPosition::new(PI / 2.0, 0.0);
+        let dir = sun.direction();
+        assert!(dir.z > 0.99, "z={}", dir.z);
+        assert!(dir.x.abs() < 0.01);
+        assert!(dir.y.abs() < 0.01);
+    }
+
+    #[test]
+    fn sun_position_south_facing() {
+        // Sun from due south at 45° altitude: azimuth=0 (from south)
+        let sun = SunPosition::new(45.0_f64.to_radians(), 0.0);
+        let dir = sun.direction();
+        // Should point toward south (negative y) and up
+        assert!(dir.y < 0.0, "y={}", dir.y);
+        assert!(dir.z > 0.0, "z={}", dir.z);
+    }
+
+    #[test]
+    fn can_shade_sun_behind_receiver() {
+        // Sun behind receiving surface → cannot shade
+        let normal = Vertex::new(0.0, -1.0, 0.0); // facing south
+        let recv_centroid = Vertex::new(0.0, 0.0, 1.5);
+        let shade_centroid = Vertex::new(0.0, 5.0, 3.0); // north of receiver
+        let sun = SunPosition::new(45.0_f64.to_radians(), PI); // sun from north
+
+        assert!(!can_shade(&normal, &recv_centroid, &shade_centroid, &sun));
+    }
+
+    #[test]
+    fn can_shade_valid_configuration() {
+        // Overhang above a south-facing wall, sun from south
+        let normal = Vertex::new(0.0, -1.0, 0.0); // facing south
+        let recv_centroid = Vertex::new(0.0, 0.0, 1.5);
+        let shade_centroid = Vertex::new(0.0, -0.5, 3.1); // above and slightly south
+        let sun = SunPosition::new(60.0_f64.to_radians(), 0.0); // sun from south, high
+
+        assert!(can_shade(&normal, &recv_centroid, &shade_centroid, &sun));
+    }
+
+    #[test]
+    fn compute_sunlit_fractions_no_shading() {
+        // Single surface, no shading surfaces → fully sunlit
+        let verts = vec![vec![
+            Vertex::new(0.0, 0.0, 0.0),
+            Vertex::new(3.0, 0.0, 0.0),
+            Vertex::new(3.0, 0.0, 2.0),
+            Vertex::new(0.0, 0.0, 2.0),
+        ]];
+        let areas = vec![6.0];
+        let normals = vec![Vertex::new(0.0, -1.0, 0.0)];
+        let centroids = vec![Vertex::new(1.5, 0.0, 1.0)];
+        let sun = SunPosition::new(45.0_f64.to_radians(), 0.0);
+
+        let result = compute_sunlit_fractions(&verts, &areas, &normals, &centroids, &[], &sun);
+        assert!((result.fractions[0] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn compute_sunlit_fractions_night() {
+        // Sun below horizon → all surfaces have sunlit fraction = 0
+        let verts = vec![vec![
+            Vertex::new(0.0, 0.0, 0.0),
+            Vertex::new(3.0, 0.0, 0.0),
+            Vertex::new(3.0, 0.0, 2.0),
+            Vertex::new(0.0, 0.0, 2.0),
+        ]];
+        let areas = vec![6.0];
+        let normals = vec![Vertex::new(0.0, -1.0, 0.0)];
+        let centroids = vec![Vertex::new(1.5, 0.0, 1.0)];
+        let sun = SunPosition::new(-0.1, 0.0);
+
+        let result = compute_sunlit_fractions(&verts, &areas, &normals, &centroids, &[], &sun);
+        assert!((result.fractions[0]).abs() < 1e-10);
+    }
+
+    #[test]
+    fn centroid_3d_simple() {
+        let verts = vec![
+            Vertex::new(0.0, 0.0, 0.0),
+            Vertex::new(4.0, 0.0, 0.0),
+            Vertex::new(4.0, 4.0, 0.0),
+            Vertex::new(0.0, 4.0, 0.0),
+        ];
+        let c = centroid_3d(&verts);
+        assert!((c.x - 2.0).abs() < 1e-10);
+        assert!((c.y - 2.0).abs() < 1e-10);
+        assert!((c.z).abs() < 1e-10);
     }
 }

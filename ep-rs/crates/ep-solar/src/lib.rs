@@ -5,6 +5,7 @@
 
 use ep_units::*;
 
+pub mod distribution;
 pub mod incident;
 pub mod shading;
 
