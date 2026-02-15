@@ -122,6 +122,67 @@ impl OutputManager {
     pub fn variable_count(&self) -> usize {
         self.variables.len()
     }
+
+    /// Register standard zone-level output variables for a zone.
+    /// Returns indices for (temperature, heating_rate, cooling_rate).
+    pub fn register_zone_variables(&mut self, zone_name: &str) -> ZoneOutputIndices {
+        let temp_idx = self.register_variable(
+            "Zone Mean Air Temperature",
+            zone_name,
+            "C",
+            StoreType::Average,
+            TimeStepType::Zone,
+        );
+        let heat_idx = self.register_variable(
+            "Zone Ideal Loads Heating Rate",
+            zone_name,
+            "W",
+            StoreType::Average,
+            TimeStepType::System,
+        );
+        let cool_idx = self.register_variable(
+            "Zone Ideal Loads Cooling Rate",
+            zone_name,
+            "W",
+            StoreType::Average,
+            TimeStepType::System,
+        );
+        ZoneOutputIndices {
+            temperature: temp_idx,
+            heating_rate: heat_idx,
+            cooling_rate: cool_idx,
+        }
+    }
+
+    /// Write ESO-format report for all reportable variables at the given
+    /// frequency. Writes a timestamp record followed by data lines.
+    pub fn write_eso_report(
+        &mut self,
+        writer: &mut impl std::io::Write,
+        freq: ReportFreq,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: f64,
+    ) -> std::io::Result<usize> {
+        let reports = self.report_variables(freq);
+        if reports.is_empty() {
+            return Ok(0);
+        }
+        eso::write_timestamp(writer, freq, month, day, hour, minute, false, "")?;
+        for (report_id, value) in &reports {
+            eso::write_data(writer, *report_id, *value)?;
+        }
+        Ok(reports.len())
+    }
+}
+
+/// Indices of registered zone-level output variables.
+#[derive(Debug, Clone, Copy)]
+pub struct ZoneOutputIndices {
+    pub temperature: usize,
+    pub heating_rate: usize,
+    pub cooling_rate: usize,
 }
 
 impl Default for OutputManager {
@@ -231,5 +292,61 @@ mod tests {
         assert_eq!(mgr.variables[0].report_id, 1);
         assert_eq!(mgr.variables[1].report_id, 2);
         assert_eq!(mgr.variables[2].report_id, 3);
+    }
+
+    #[test]
+    fn register_zone_variables() {
+        let mut mgr = OutputManager::new();
+        let indices = mgr.register_zone_variables("TestZone");
+        assert_eq!(mgr.variable_count(), 3);
+        assert_eq!(mgr.variables[indices.temperature].name, "Zone Mean Air Temperature");
+        assert_eq!(mgr.variables[indices.heating_rate].name, "Zone Ideal Loads Heating Rate");
+        assert_eq!(mgr.variables[indices.cooling_rate].name, "Zone Ideal Loads Cooling Rate");
+        assert_eq!(mgr.variables[indices.temperature].key, "TestZone");
+    }
+
+    #[test]
+    fn register_zone_variables_multiple_zones() {
+        let mut mgr = OutputManager::new();
+        let z1 = mgr.register_zone_variables("Zone1");
+        let z2 = mgr.register_zone_variables("Zone2");
+        assert_eq!(mgr.variable_count(), 6);
+        assert_ne!(z1.temperature, z2.temperature);
+        assert_eq!(mgr.variables[z1.temperature].key, "Zone1");
+        assert_eq!(mgr.variables[z2.temperature].key, "Zone2");
+    }
+
+    #[test]
+    fn write_eso_report_hourly() {
+        let mut mgr = OutputManager::new();
+        let idx = mgr.register_variable(
+            "Zone Mean Air Temperature", "Z1", "C",
+            StoreType::Average, TimeStepType::Zone,
+        );
+        mgr.variables[idx].set_value(22.5);
+        let ts = TimeStamp { month: 1, day: 1, hour: 1, minute: 0 };
+        mgr.update_data(TimeStepType::Zone, 1.0, &ts);
+        mgr.add_request(OutputRequest {
+            key: "*".to_string(),
+            variable_name: "Zone Mean Air Temperature".to_string(),
+            freq: ReportFreq::Hourly,
+        });
+        mgr.resolve_requests();
+
+        let mut buf = Vec::new();
+        let count = mgr.write_eso_report(&mut buf, ReportFreq::Hourly, 1, 1, 1, 0.0).unwrap();
+        assert_eq!(count, 1);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("3,")); // hourly timestamp prefix
+        assert!(output.contains("22.5"));
+    }
+
+    #[test]
+    fn write_eso_report_empty() {
+        let mut mgr = OutputManager::new();
+        let mut buf = Vec::new();
+        let count = mgr.write_eso_report(&mut buf, ReportFreq::Hourly, 1, 1, 1, 0.0).unwrap();
+        assert_eq!(count, 0);
+        assert!(buf.is_empty());
     }
 }

@@ -153,6 +153,105 @@ pub struct ZoneBalanceResult {
     pub in_deadband: bool,
 }
 
+/// High-level wrapper combining the predictor-corrector cycle.
+///
+/// Encapsulates the zone air solution algorithm, thermostat control type,
+/// and zone thermal capacity for convenient use in the simulation driver.
+#[derive(Debug, Clone)]
+pub struct ZonePredictorCorrector {
+    /// Solution algorithm for this zone.
+    pub algorithm: SolutionAlgorithm,
+    /// Thermostat control type.
+    pub control: ThermostatControl,
+    /// Zone thermal capacity C = rho*V*Cp/dt (W/K).
+    pub air_power_cap: f64,
+    /// Heating setpoint (C).
+    pub heating_setpoint: f64,
+    /// Cooling setpoint (C).
+    pub cooling_setpoint: f64,
+}
+
+impl ZonePredictorCorrector {
+    pub fn new(
+        algorithm: SolutionAlgorithm,
+        control: ThermostatControl,
+        air_power_cap: f64,
+    ) -> Self {
+        Self {
+            algorithm,
+            control,
+            air_power_cap,
+            heating_setpoint: 20.0,
+            cooling_setpoint: 26.0,
+        }
+    }
+
+    /// Predictor step: estimate the system load required to meet setpoints.
+    pub fn predict(
+        &self,
+        state: &ZoneAirState,
+        coeffs: &HeatBalanceCoefficients,
+    ) -> ZoneBalanceResult {
+        predictor::predict_system_load(
+            self.algorithm,
+            self.control,
+            state,
+            coeffs,
+            self.air_power_cap,
+            self.heating_setpoint,
+            self.cooling_setpoint,
+        )
+    }
+
+    /// Corrector step: solve for actual zone temperature after HVAC response,
+    /// advance zone air state history.
+    pub fn correct(
+        &self,
+        zone_state: &mut ZoneAirState,
+        coeffs: &HeatBalanceCoefficients,
+    ) -> corrector::CorrectorResult {
+        let new_temp = corrector::correct_zone_temperature(
+            self.algorithm,
+            zone_state,
+            coeffs,
+            self.air_power_cap,
+        );
+
+        // Keep humidity constant for simplified model (no latent loads)
+        let new_w = zone_state.humidity_ratio;
+
+        // Calculate sensible load met
+        let cp = cp_air(zone_state.humidity_ratio);
+        let sys_mass_flow = if cp > 0.0 {
+            coeffs.sum_sys_mcp / cp
+        } else {
+            0.0
+        };
+        let supply_temp = if coeffs.sum_sys_mcp > 1e-10 {
+            coeffs.sum_sys_mcpt / coeffs.sum_sys_mcp
+        } else {
+            new_temp
+        };
+        let sensible_load = corrector::calculate_sensible_load_met(
+            sys_mass_flow,
+            supply_temp,
+            new_temp,
+            zone_state.humidity_ratio,
+            coeffs.non_air_system_response,
+        );
+
+        // Advance state history
+        zone_state.advance(new_temp, new_w);
+
+        corrector::CorrectorResult {
+            temperature: new_temp,
+            humidity_ratio: new_w,
+            sensible_load_met: sensible_load,
+            latent_load_met: 0.0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +294,84 @@ mod tests {
         let cap = zone_air_power_cap(300.0, 0.008, 1.2, 3600.0, 1.0);
         // cap = 300 * 1.0 * 1.2 * 1005 / 3600 ≈ 100.5 W/K
         assert!(cap > 90.0 && cap < 110.0, "cap={cap}");
+    }
+
+    #[test]
+    fn predictor_corrector_wrapper_uncontrolled() {
+        let pc = ZonePredictorCorrector::new(
+            SolutionAlgorithm::ThirdOrder,
+            ThermostatControl::Uncontrolled,
+            100.0, // ~100 W/K
+        );
+        let state = ZoneAirState::new(22.0, 0.008);
+        let coeffs = HeatBalanceCoefficients {
+            sum_ha: 200.0,
+            sum_hat_surf: 4800.0, // surfaces at 24C
+            sum_internal_convective: 500.0,
+            ..Default::default()
+        };
+
+        let result = pc.predict(&state, &coeffs);
+        assert!(result.in_deadband);
+        // Temperature should be above 22 due to warm surfaces + gains
+        assert!(result.temperature > 22.0, "T={}", result.temperature);
+    }
+
+    #[test]
+    fn predictor_corrector_wrapper_correct_advances_state() {
+        let pc = ZonePredictorCorrector::new(
+            SolutionAlgorithm::ThirdOrder,
+            ThermostatControl::DualSetPoint,
+            100.0,
+        );
+        let mut state = ZoneAirState::new(22.0, 0.008);
+        let coeffs = HeatBalanceCoefficients {
+            sum_ha: 200.0,
+            sum_hat_surf: 4400.0,
+            sum_internal_convective: 0.0,
+            sum_sys_mcp: 100.0,
+            sum_sys_mcpt: 2200.0, // system at 22C
+            ..Default::default()
+        };
+
+        let result = pc.correct(&mut state, &coeffs);
+        // State should have been advanced
+        assert!((state.temp_history[0] - 22.0).abs() < 0.01);
+        assert!((result.temperature - state.temperature).abs() < 1e-10);
+    }
+
+    #[test]
+    fn predictor_corrector_wrapper_setpoints() {
+        let mut pc = ZonePredictorCorrector::new(
+            SolutionAlgorithm::ThirdOrder,
+            ThermostatControl::SingleHeat,
+            100.0,
+        );
+        pc.heating_setpoint = 21.0;
+        pc.cooling_setpoint = 25.0;
+
+        // Cold room with cold surfaces
+        let state = ZoneAirState::new(15.0, 0.008);
+        let coeffs = HeatBalanceCoefficients {
+            sum_ha: 200.0,
+            sum_hat_surf: 2000.0, // surfaces at 10C
+            ..Default::default()
+        };
+
+        let result = pc.predict(&state, &coeffs);
+        // Should need heating to reach 21C
+        assert!(result.load_to_heating_setpoint > 0.0,
+            "load={}", result.load_to_heating_setpoint);
+    }
+
+    #[test]
+    fn predictor_corrector_wrapper_default_setpoints() {
+        let pc = ZonePredictorCorrector::new(
+            SolutionAlgorithm::ThirdOrder,
+            ThermostatControl::DualSetPoint,
+            100.0,
+        );
+        assert!((pc.heating_setpoint - 20.0).abs() < 1e-10);
+        assert!((pc.cooling_setpoint - 26.0).abs() < 1e-10);
     }
 }

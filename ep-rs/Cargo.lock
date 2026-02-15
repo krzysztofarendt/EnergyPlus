@@ -298,8 +298,19 @@ name = "ep-sim"
 version = "0.1.0"
 dependencies = [
  "ep-core",
+ "ep-envelope",
+ "ep-internal-gains",
+ "ep-io",
+ "ep-materials",
+ "ep-output",
+ "ep-psychrometrics",
  "ep-schedule",
+ "ep-solar",
+ "ep-surfaces",
+ "ep-units",
  "ep-weather",
+ "ep-zone-air",
+ "serde_json",
 ]
 
 [[package]]
