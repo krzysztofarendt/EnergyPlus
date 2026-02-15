@@ -3,7 +3,7 @@
 ## Project Charter for a Modern Building Energy Simulation Engine
 
 **Version:** 2.0
-**Date:** 2026-02-14
+**Date:** 2026-02-15
 **Status:** In Progress — Phases 0–9 Complete, Simulation Driver Pending
 
 ---
@@ -27,7 +27,7 @@
 
 ## 1. Current State Assessment
 
-The Rust workspace (`ep-rs/`) contains **33 crates** with **1,070 passing tests** and **~42,000 lines of Rust**. Phases 0–9 are complete. The C++ EnergyPlus codebase is **~800K lines** across 200+ modules.
+The Rust workspace (`ep-rs/`) contains **33 crates** with **1,070 passing tests** and **~43,000 lines of Rust**. Phases 0–9 are complete. The C++ EnergyPlus codebase is **~800K lines** across 200+ modules.
 
 ### 1.1 Completed Work
 
@@ -44,8 +44,8 @@ The Rust workspace (`ep-rs/`) contains **33 crates** with **1,070 passing tests*
 | **I/O Framework** | ep-io | 48 | Good — IDF parser, ~15 object schema defs, macro preprocessor |
 | **Surface Geometry** | ep-surfaces | 20 | Partial — vertices, normals, area, tilt, zone topology; **no heat balance** |
 | **Envelope** | ep-envelope | 77 | Good — CTF, convection (18 correlations), radiant exchange (ScriptF), heat balance solver |
-| **Window Optics** | ep-windows | 48 | Good — angular optics, thermal solver (tridiagonal), shading devices, frame/divider |
-| **Solar Incident** | ep-solar | 40 | Good — sun position, Perez/HDKR, shadow casting, solar distribution |
+| **Window Optics** | ep-windows | 37 | Good — angular optics, thermal solver (tridiagonal), shading devices, frame/divider |
+| **Solar Incident** | ep-solar | 41 | Good — sun position, Perez/HDKR, shadow casting, solar distribution |
 | **Ground Temp** | ep-ground | 18 | Partial — Kusuda model, monthly interpolation; **no Kiva/3D** |
 | **Zone Air Balance** | ep-zone-air | 14 | Moderate — 3 solution methods, infiltration; **limited HVAC coupling** |
 | **Internal Gains** | ep-internal-gains | 32 | Good — occupancy, lights, equipment with fraction splits |
@@ -70,7 +70,7 @@ The Rust workspace (`ep-rs/`) contains **33 crates** with **1,070 passing tests*
 
 ### 1.2 Key Insight
 
-Phases 6–8 added the core simulation physics: surface heat balance (CTF, radiant exchange, convection), solar/shading/daylighting, and HVAC integration (air loop solver, zone equipment dispatch, controllers). The remaining blockers for end-to-end simulation are the plant loop solver (Phase 9) and the simulation driver wiring (Phase 10). Equipment breadth (Phase 11) and advanced features (Phase 12) can proceed incrementally after that.
+Phases 6–9 completed all core simulation physics: surface heat balance (CTF, radiant exchange, convection), solar/shading/daylighting, HVAC integration (air loop solver, zone equipment dispatch, controllers), and plant loop integration (loop solver, enhanced chillers, heat pumps, GHX, thermal storage). The sole remaining blocker for end-to-end simulation is the simulation driver wiring (Phase 10). Equipment breadth (Phase 11) and advanced features (Phase 12) can proceed incrementally after that.
 
 ---
 
@@ -104,11 +104,11 @@ The C++ codebase has extensive equipment breadth not yet replicated:
 | DX coils (multi-speed, two-stage) | ~22K | 10 | Single-speed with defrost/crankcase/PLF |
 | Heat recovery (air-to-air) | ~5K | 4 | None |
 | Zone HVAC (fan coils, baseboards, radiant) | ~30K | 20+ | Baseboard convective water |
-| Chillers (7 types) | ~23K | 9 | EIR only |
-| Heat pumps (water-to-water, plant EIR) | ~12K | 6 | None |
-| Ground heat exchangers | ~10K | 5 | None |
-| Thermal storage (ice, stratified tank) | ~16K | 6 | Mixed tank only |
-| Additional towers/coolers | ~10K | 8 | Single-speed tower only |
+| Chillers (7 types) | ~23K | 9 | EIR, reformulated EIR, absorption, constant COP (4 types) |
+| Heat pumps (water-to-water, plant EIR) | ~12K | 6 | Water-to-water equation fit, EIR (2 types) |
+| Ground heat exchangers | ~10K | 5 | Vertical borehole (g-function), slinky, surface (3 types) |
+| Thermal storage (ice, stratified tank) | ~16K | 6 | Stratified tank, ice storage (2 types) |
+| Additional towers/coolers | ~10K | 8 | Single-speed tower, headered pumps |
 | Thermal comfort models | ~3K | 6 models | None |
 | Room air models | ~5K | 5 models | None |
 | CondFD (finite difference conduction) | ~3K | N/A | None |
