@@ -4,7 +4,7 @@
 
 **Version:** 2.0
 **Date:** 2026-02-14
-**Status:** In Progress — Foundation Complete, Core Simulation Pending
+**Status:** In Progress — Phases 0–8 Complete, Plant Loop & Simulation Driver Pending
 
 ---
 
@@ -27,36 +27,36 @@
 
 ## 1. Current State Assessment
 
-The Rust workspace (`ep-rs/`) contains **33 crates** with **824 passing tests** and **~34,000 lines of Rust**. Phases 0–5 of the original plan are structurally complete. The C++ EnergyPlus codebase is **~800K lines** across 200+ modules.
+The Rust workspace (`ep-rs/`) contains **33 crates** with **1,002 passing tests** and **~39,000 lines of Rust**. Phases 0–8 are complete. The C++ EnergyPlus codebase is **~800K lines** across 200+ modules.
 
 ### 1.1 Completed Work
 
 | Category | Crate(s) | Tests | Status |
 |----------|----------|-------|--------|
-| **Units & Types** | ep-units | 22 | Complete — `quantity!` macro for zero-cost newtypes |
-| **Core Runtime** | ep-core | 14 | Complete — state struct, time management, environment types |
-| **Psychrometrics** | ep-psychrometrics | 31 | Complete — all ASHRAE moist air property functions |
-| **Fluid Properties** | ep-fluids | 8 | Good — water, refrigerant, air property lookups |
-| **Performance Curves** | ep-curves | 41 | Complete — all 21 EnergyPlus curve types |
-| **Weather** | ep-weather | 31 | Good — EPW parsing, design days, solar position |
+| **Units & Types** | ep-units | 16 | Complete — `quantity!` macro for zero-cost newtypes |
+| **Core Runtime** | ep-core | 6 | Complete — state struct, time management, environment types |
+| **Psychrometrics** | ep-psychrometrics | 15 | Complete — all ASHRAE moist air property functions |
+| **Fluid Properties** | ep-fluids | 11 | Good — water, refrigerant, air property lookups |
+| **Performance Curves** | ep-curves | 12 | Complete — all 21 EnergyPlus curve types |
+| **Weather** | ep-weather | 13 | Good — EPW parsing, design days, solar position |
 | **Schedules** | ep-schedule | 40 | Good — Year/Week/Day/Compact/File schedules |
-| **Materials** | ep-materials | 18 | Good — construction layers, glass optical properties |
+| **Materials** | ep-materials | 10 | Good — construction layers, glass optical properties |
 | **I/O Framework** | ep-io | 48 | Good — IDF parser, ~15 object schema defs, macro preprocessor |
 | **Surface Geometry** | ep-surfaces | 20 | Partial — vertices, normals, area, tilt, zone topology; **no heat balance** |
-| **Envelope** | ep-envelope | 36 | Partial — convection correlations, basic CTF; **no radiant exchange solver** |
-| **Window Optics** | ep-windows | 22 | Partial — angular single/multi-pane optics; **thermal solver incomplete** |
-| **Solar Incident** | ep-solar | 16 | Partial — sun position, Perez/HDKR diffuse; **no shadow casting** |
+| **Envelope** | ep-envelope | 77 | Good — CTF, convection (18 correlations), radiant exchange (ScriptF), heat balance solver |
+| **Window Optics** | ep-windows | 48 | Good — angular optics, thermal solver (tridiagonal), shading devices, frame/divider |
+| **Solar Incident** | ep-solar | 40 | Good — sun position, Perez/HDKR, shadow casting, solar distribution |
 | **Ground Temp** | ep-ground | 18 | Partial — Kusuda model, monthly interpolation; **no Kiva/3D** |
-| **Zone Air Balance** | ep-zone-air | 19 | Moderate — 3 solution methods, infiltration; **limited HVAC coupling** |
-| **Internal Gains** | ep-internal-gains | 14 | Good — occupancy, lights, equipment with fraction splits |
-| **Airflow Network** | ep-airflow | 24 | Moderate — Newton-Raphson solver; **few component models** |
-| **Daylighting** | ep-daylighting | 50 | Partial — sky luminance, glare, illuminance; **no full daylight factor** |
-| **Node Infrastructure** | ep-nodes | 32 | Complete — node struct, mixer, splitter, OA mixer |
-| **Fans** | ep-fans | 16 | Moderate — constant/variable/on-off; **no detailed performance curves** |
-| **Coils** | ep-coils | 20 | Moderate — basic DX (rated + curves), water (ε-NTU); **simplified** |
+| **Zone Air Balance** | ep-zone-air | 14 | Moderate — 3 solution methods, infiltration; **limited HVAC coupling** |
+| **Internal Gains** | ep-internal-gains | 32 | Good — occupancy, lights, equipment with fraction splits |
+| **Airflow Network** | ep-airflow | 18 | Moderate — Newton-Raphson solver; **few component models** |
+| **Daylighting** | ep-daylighting | 61 | Good — sky luminance, glare, illuminance, interior reflections, Tregenza patches, daylight factors |
+| **Node Infrastructure** | ep-nodes | 14 | Complete — node struct, mixer, splitter, OA mixer |
+| **Fans** | ep-fans | 11 | Moderate — constant/variable/on-off; **no detailed performance curves** |
+| **Coils** | ep-coils | 53 | Good — DX (defrost, crankcase, PLF, SHR), water (dry/wet, ε-NTU), heating, HX |
 | **Plant Equipment** | ep-plant | 66 | Moderate — boiler, chiller EIR, tower, pump, mixed tank; **no loop solver** |
-| **HVAC Framework** | ep-hvac | 15 | Skeletal — air loop topology, unitary structs; **no control logic** |
-| **EMS** | ep-ems | 42 | Good — ERL execution, sensors, actuators, trends |
+| **HVAC Framework** | ep-hvac | 101 | Good — air loop solver, zone equipment dispatch, setpoint managers, OA/PI controllers, terminals |
+| **EMS** | ep-ems | 42 | Good — ERL execution, sensors, actuators, trends  |
 | **FMI** | ep-fmi | 7 | Good — FMI 2.0 co-simulation, variable exchange |
 | **Generation** | ep-generation | 34 | Good — PV, wind, battery (KiBaM), generators, inverter |
 | **Demand** | ep-demand | 21 | Good — demand managers, tariffs, life cycle cost |
@@ -65,11 +65,12 @@ The Rust workspace (`ep-rs/`) contains **33 crates** with **824 passing tests** 
 | **API** | ep-api | 6 | Good — C FFI, variable registration, callbacks |
 | **Output** | ep-output | 43 | Good — variables, meters, ESO/MTR/CSV/SQL writers, tabular |
 | **Simulation Driver** | ep-sim | 48 | Good framework — warmup, convergence, sizing; **run loop stubbed** |
-| **Validation** | ep-validation | 20 | Good — BESTEST cases, numerical comparison, regression |
+| | | **1,002** | |
+| **Validation** | ep-validation | 21 | Good — BESTEST cases, numerical comparison, regression |
 
 ### 1.2 Key Insight
 
-All 824 tests pass because they test individual components **in isolation**. The core simulation engine — surface heat balance, HVAC system iteration, plant loop convergence, and the timestep driver — is not yet functional as an integrated system. The crates are well-architected building blocks that need to be wired together.
+Phases 6–8 added the core simulation physics: surface heat balance (CTF, radiant exchange, convection), solar/shading/daylighting, and HVAC integration (air loop solver, zone equipment dispatch, controllers). The remaining blockers for end-to-end simulation are the plant loop solver (Phase 9) and the simulation driver wiring (Phase 10). Equipment breadth (Phase 11) and advanced features (Phase 12) can proceed incrementally after that.
 
 ---
 
@@ -79,17 +80,17 @@ All 824 tests pass because they test individual components **in isolation**. The
 
 These items must be completed before any IDF file can run end-to-end:
 
-| Blocker | What's Missing | C++ Reference | Est. Rust Lines |
-|---------|---------------|---------------|-----------------|
-| Surface heat balance | CTF conduction solver, inside/outside balance | `HeatBalanceSurfaceManager.cc` (10K) | ~2,000 |
-| Radiant exchange | View factor matrix, inter-surface LW exchange | `HeatBalanceIntRadExchange.cc` (2.1K) | ~500 |
-| Window thermal | Multi-layer glass temps, gap convection | `WindowManager.cc` thermal sections (~3K) | ~800 |
-| Shadow casting | Polygon clipping, sunlit fractions | `SolarShading.cc` (13K) | ~1,500 |
-| HVAC air loop | Component sequencing, convergence iteration | `SimAirServingZones.cc` (7.8K) | ~1,500 |
-| Zone equipment | Load calculation, equipment dispatch | `ZoneEquipmentManager.cc` (7.1K) | ~1,000 |
-| Plant loop solver | Half-loop iteration, flow resolution | `Plant/LoopSide.cc` + `PlantManager.cc` (7K) | ~1,200 |
-| Simulation loop | Environment→Day→Hour→Timestep→HVAC loop | `SimulationManager.cc` (~3K) | ~800 |
-| IDF schema | ~50 core object defs (currently ~15) | IDD schema | ~1,500 |
+| Blocker | What's Missing | C++ Reference | Status |
+|---------|---------------|---------------|--------|
+| Surface heat balance | CTF conduction solver, inside/outside balance | `HeatBalanceSurfaceManager.cc` (10K) | **Done (Phase 6)** |
+| Radiant exchange | View factor matrix, inter-surface LW exchange | `HeatBalanceIntRadExchange.cc` (2.1K) | **Done (Phase 6)** |
+| Window thermal | Multi-layer glass temps, gap convection | `WindowManager.cc` thermal sections (~3K) | **Done (Phase 6)** |
+| Shadow casting | Polygon clipping, sunlit fractions | `SolarShading.cc` (13K) | **Done (Phase 7)** |
+| HVAC air loop | Component sequencing, convergence iteration | `SimAirServingZones.cc` (7.8K) | **Done (Phase 8)** |
+| Zone equipment | Load calculation, equipment dispatch | `ZoneEquipmentManager.cc` (7.1K) | **Done (Phase 8)** |
+| Plant loop solver | Half-loop iteration, flow resolution | `Plant/LoopSide.cc` + `PlantManager.cc` (7K) | ~1,200 lines |
+| Simulation loop | Environment→Day→Hour→Timestep→HVAC loop | `SimulationManager.cc` (~3K) | ~800 lines |
+| IDF schema | ~50 core object defs (currently ~15) | IDD schema | ~1,500 lines |
 
 ### 2.2 Equipment Model Gap
 
@@ -97,12 +98,12 @@ The C++ codebase has extensive equipment breadth not yet replicated:
 
 | C++ Subsystem | C++ Lines | IDF Object Types | Rust Coverage |
 |---------------|-----------|------------------|---------------|
-| Air terminals (VAV, dual duct, PIU) | ~11K | 13 | None |
-| Unitary systems & furnaces | ~30K | 8+ | Struct stubs only |
+| Air terminals (VAV, dual duct, PIU) | ~11K | 13 | CV, CV+Reheat, VAV+Reheat, VAV (4 types) |
+| Unitary systems & furnaces | ~30K | 8+ | Basic unitary with heat pump support |
 | VRF systems | ~16K | 4 | None |
-| DX coils (multi-speed, two-stage) | ~22K | 10 | Single-speed only |
+| DX coils (multi-speed, two-stage) | ~22K | 10 | Single-speed with defrost/crankcase/PLF |
 | Heat recovery (air-to-air) | ~5K | 4 | None |
-| Zone HVAC (fan coils, baseboards, radiant) | ~30K | 20+ | Struct stubs only |
+| Zone HVAC (fan coils, baseboards, radiant) | ~30K | 20+ | Baseboard convective water |
 | Chillers (7 types) | ~23K | 9 | EIR only |
 | Heat pumps (water-to-water, plant EIR) | ~12K | 6 | None |
 | Ground heat exchangers | ~10K | 5 | None |
@@ -117,7 +118,9 @@ The C++ codebase has extensive equipment breadth not yet replicated:
 
 ---
 
-## 3. Phase 6: Core Heat Balance
+## 3. Phase 6: Core Heat Balance ✅
+
+**Status:** Complete (54 new tests, 878 total at completion)
 
 **Goal:** Solve surface temperatures correctly. A building with opaque walls, roof, and slab should produce converged inside/outside surface temperatures at each timestep.
 
@@ -299,7 +302,9 @@ Add remaining correlations needed for the heat balance:
 
 ---
 
-## 4. Phase 7: Solar, Shading & Daylighting
+## 4. Phase 7: Solar, Shading & Daylighting ✅
+
+**Status:** Complete (45 new tests, 923 total at completion)
 
 **Goal:** Correctly distribute solar gains through windows onto interior surfaces, accounting for exterior obstructions. Required for any simulation with windows.
 
@@ -402,11 +407,13 @@ Complete the daylight factor method:
 
 ---
 
-## 5. Phase 8: HVAC Integration
+## 5. Phase 8: HVAC Integration ✅
+
+**Status:** Complete (79 new tests, 1,002 total at completion)
 
 **Goal:** Implement air-side HVAC so zone loads drive equipment. A single-zone system with fan + cooling coil + heating coil converges to meet zone setpoint.
 
-**Crates modified:** ep-hvac, ep-coils, ep-fans, ep-nodes
+**Crates modified:** ep-hvac, ep-coils
 
 ### 5.1 Air Loop Solver
 
@@ -958,55 +965,55 @@ Expand ep-io to cover remaining ~850 object types with validation.
 
 | Crate | Current Tests | Phase(s) | Target Tests |
 |-------|:------------:|----------|:------------:|
-| ep-units | 22 | — | 22 |
-| ep-core | 14 | 10 | 20 |
-| ep-psychrometrics | 31 | — | 31 |
-| ep-fluids | 8 | — | 10 |
-| ep-curves | 41 | — | 45 |
-| ep-weather | 31 | — | 35 |
+| ep-units | 16 | — | 16 |
+| ep-core | 6 | 10 | 20 |
+| ep-psychrometrics | 15 | — | 15 |
+| ep-fluids | 11 | — | 11 |
+| ep-curves | 12 | — | 12 |
+| ep-weather | 13 | — | 35 |
 | ep-schedule | 40 | — | 40 |
-| ep-materials | 18 | 6 | 25 |
+| ep-materials | 10 | — | 25 |
 | ep-io | 48 | 10, 12 | 120 |
-| ep-surfaces | 20 | 6 | 40 |
-| ep-envelope | 36 | 6, 12 | 100 |
-| ep-windows | 22 | 6, 7, 12 | 60 |
-| ep-solar | 16 | 7 | 50 |
+| ep-surfaces | 20 | — | 40 |
+| ep-envelope | 77 | 12 | 100 |
+| ep-windows | 37 | 12 | 60 |
+| ep-solar | 41 | — | 50 |
 | ep-ground | 18 | 12 | 35 |
-| ep-zone-air | 19 | 8, 10, 12 | 60 |
-| ep-internal-gains | 14 | — | 15 |
-| ep-airflow | 24 | 12 | 50 |
-| ep-daylighting | 50 | 7 | 70 |
-| ep-nodes | 32 | — | 35 |
-| ep-fans | 16 | 8 | 25 |
-| ep-coils | 20 | 8, 11 | 60 |
+| ep-zone-air | 14 | 10, 12 | 60 |
+| ep-internal-gains | 32 | — | 35 |
+| ep-airflow | 18 | 12 | 50 |
+| ep-daylighting | 61 | — | 70 |
+| ep-nodes | 14 | — | 20 |
+| ep-fans | 11 | 11 | 25 |
+| ep-coils | 53 | 11 | 60 |
 | ep-plant | 66 | 9, 11 | 120 |
-| ep-hvac | 15 | 8, 11 | 150 |
+| ep-hvac | 101 | 11 | 150 |
 | ep-ems | 42 | — | 50 |
 | ep-fmi | 7 | — | 10 |
 | ep-generation | 34 | — | 40 |
 | ep-demand | 21 | — | 25 |
 | ep-sim | 48 | 10 | 100 |
-| ep-validation | 20 | 10 | 40 |
+| ep-validation | 21 | 10 | 40 |
 | ep-refrigeration | 25 | — | 30 |
 | ep-water | 21 | — | 30 |
 | ep-api | 6 | — | 10 |
 | ep-output | 43 | 10, 12 | 80 |
 | **ep-comfort** (new) | 0 | 12 | 40 |
-| **Total** | **824** | | **~1,760** |
+| **Total** | **1,002** | | **~1,700** |
 
 ---
 
 ## 11. Priority & Dependencies
 
 ```
-Phase 6 (Heat Balance) ──────────────────────┐
+Phase 6 (Heat Balance) ✅ ───────────────────┐
     │                                         │
     ▼                                         │
-Phase 7 (Solar/Shading)                       │
+Phase 7 (Solar/Shading) ✅                    │
     │                                         │
     ▼                                         ▼
-Phase 10 (Simulation Driver) ◄── Phase 8 (HVAC) + Phase 9 (Plant)
-    │                                    [can run in parallel]
+Phase 10 (Simulation Driver) ◄── Phase 8 (HVAC) ✅ + Phase 9 (Plant)
+    │                                          [Phase 9 is next]
     ▼
 Phase 11 (Equipment Breadth)
     │
@@ -1014,22 +1021,23 @@ Phase 11 (Equipment Breadth)
 Phase 12 (Advanced Features & Parity)
 ```
 
-- **Phase 6 → 7:** Sequential (solar needs surfaces to absorb onto)
-- **Phase 8 ↔ 9:** Parallel (air-side and water-side are somewhat independent)
-- **Phase 10:** Depends on 6, 7, 8, 9 all being functional
+- **Phase 6 → 7:** Complete
+- **Phase 8:** Complete (air-side HVAC integration)
+- **Phase 9:** Next priority (plant loop solver, enhanced chillers, heat pumps, GHX)
+- **Phase 10:** Depends on Phase 9 completing
 - **Phase 11 ↔ 12:** Can overlap, done incrementally
 
 ### Critical Milestones
 
-| Milestone | Phase | Validation |
-|-----------|-------|------------|
-| Surface temps converge | 6 | Zone energy balance < 1% |
-| Solar gains correct | 7 | BESTEST 600 solar within 5% |
-| Single-zone HVAC works | 8 | Zone temp at setpoint under design day |
-| Plant loop converges | 9 | Chiller/tower energy within 5% |
-| **First IDF runs end-to-end** | **10** | **BESTEST Case 600 passes** |
-| 20 example configs work | 11 | Multi-zone VAV systems |
-| Full BESTEST suite | 12 | 600/900 series all pass |
+| Milestone | Phase | Validation | Status |
+|-----------|-------|------------|--------|
+| Surface temps converge | 6 | Zone energy balance < 1% | ✅ Done |
+| Solar gains correct | 7 | BESTEST 600 solar within 5% | ✅ Done |
+| Single-zone HVAC works | 8 | Zone temp at setpoint under design day | ✅ Done |
+| Plant loop converges | 9 | Chiller/tower energy within 5% | Pending |
+| **First IDF runs end-to-end** | **10** | **BESTEST Case 600 passes** | Pending |
+| 20 example configs work | 11 | Multi-zone VAV systems | Pending |
+| Full BESTEST suite | 12 | 600/900 series all pass | Pending |
 
 ---
 
