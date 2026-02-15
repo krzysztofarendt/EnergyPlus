@@ -8,5 +8,6 @@
 //! with a skyline LU factorization of the Jacobian.
 
 pub mod components;
+pub mod distribution;
 pub mod network;
 pub mod solver;

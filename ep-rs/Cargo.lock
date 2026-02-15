@@ -76,6 +76,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ep-comfort"
+version = "0.1.0"
+dependencies = [
+ "ep-core",
+ "ep-psychrometrics",
+ "ep-units",
+]
+
+[[package]]
 name = "ep-core"
 version = "0.1.0"
 dependencies = [

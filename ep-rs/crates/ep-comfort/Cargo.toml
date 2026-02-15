@@ -1,0 +1,10 @@
+[package]
+name = "ep-comfort"
+version = "0.1.0"
+edition = "2021"
+description = "Thermal comfort models for EnergyPlus-rs"
+
+[dependencies]
+ep-units = { workspace = true }
+ep-core = { workspace = true }
+ep-psychrometrics = { workspace = true }

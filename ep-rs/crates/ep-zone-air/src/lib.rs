@@ -14,6 +14,7 @@
 
 pub mod corrector;
 pub mod predictor;
+pub mod room_air;
 
 use ep_psychrometrics::cp_air;
 

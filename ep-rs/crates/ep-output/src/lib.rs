@@ -11,6 +11,7 @@ pub mod csv;
 pub mod eso;
 pub mod meters;
 pub mod mtr;
+pub mod reports;
 pub mod sql;
 pub mod tabular;
 pub mod variables;

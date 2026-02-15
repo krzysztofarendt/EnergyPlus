@@ -4,6 +4,7 @@
 //! convection coefficient models (TARP, DOE-2), and the complete
 //! outside/inside surface heat balance.
 
+pub mod condfd;
 pub mod convection;
 pub mod ctf;
 pub mod heat_balance;

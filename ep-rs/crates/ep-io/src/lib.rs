@@ -8,6 +8,7 @@ use std::path::Path;
 pub mod idf;
 pub mod macro_proc;
 pub mod schema;
+pub mod schema_extended;
 pub mod validation;
 
 /// Parsed input model containing all objects from an IDF or epJSON file.

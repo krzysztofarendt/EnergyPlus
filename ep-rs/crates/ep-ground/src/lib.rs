@@ -5,6 +5,8 @@
 //! - Monthly ground temperature schedule
 //! - Shallow ground temperature based on weather data
 
+pub mod foundation;
+
 use std::f64::consts::PI;
 
 /// Kusuda-Achenbach undisturbed ground temperature model.

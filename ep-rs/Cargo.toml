@@ -34,6 +34,7 @@ members = [
     "crates/ep-water",
     "crates/ep-api",
     "crates/ep-output",
+    "crates/ep-comfort",
     "tools/idf-convert",
     "tools/ep-diff",
 ]
@@ -82,6 +83,7 @@ ep-refrigeration = { path = "crates/ep-refrigeration" }
 ep-water = { path = "crates/ep-water" }
 ep-api = { path = "crates/ep-api" }
 ep-output = { path = "crates/ep-output" }
+ep-comfort = { path = "crates/ep-comfort" }
 
 [profile.release]
 lto = "thin"
