@@ -14,7 +14,9 @@ ep-envelope = { workspace = true }
 ep-materials = { workspace = true }
 ep-surfaces = { workspace = true }
 ep-solar = { workspace = true }
+ep-windows = { workspace = true }
 ep-internal-gains = { workspace = true }
 ep-psychrometrics = { workspace = true }
 ep-units = { workspace = true }
+ep-validation = { workspace = true }
 serde_json = { workspace = true }

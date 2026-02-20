@@ -1,0 +1,10 @@
+[package]
+name = "ep-run"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ep-sim = { workspace = true }
+ep-weather = { workspace = true }
+ep-validation = { workspace = true }
+ep-core = { workspace = true }

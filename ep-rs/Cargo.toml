@@ -37,6 +37,7 @@ members = [
     "crates/ep-comfort",
     "tools/idf-convert",
     "tools/ep-diff",
+    "tools/ep-run",
 ]
 
 [workspace.dependencies]

@@ -4,6 +4,7 @@
 //! Models the EnergyPlus SimulationManager nested loop structure:
 //! Environment → Day → Hour → Timestep → HVAC iterations.
 
+pub mod bestest600;
 pub mod building;
 pub mod convergence;
 pub mod environment;

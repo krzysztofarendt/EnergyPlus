@@ -295,6 +295,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ep-run"
+version = "0.1.0"
+dependencies = [
+ "ep-core",
+ "ep-sim",
+ "ep-validation",
+ "ep-weather",
+]
+
+[[package]]
 name = "ep-schedule"
 version = "0.1.0"
 dependencies = [
@@ -317,7 +327,9 @@ dependencies = [
  "ep-solar",
  "ep-surfaces",
  "ep-units",
+ "ep-validation",
  "ep-weather",
+ "ep-windows",
  "ep-zone-air",
  "serde_json",
 ]
